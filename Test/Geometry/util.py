@@ -1054,6 +1054,10 @@ def CartogramFramework_global(
     area_terms = []
     center_terms = []
 
+    pairwise_distance_terms = []
+    pairwise_h = {}
+    pairwise_v = {}
+
     relative_direction_term = 0
     topology_term = 0
 
@@ -1094,20 +1098,6 @@ def CartogramFramework_global(
         fixed_point = np.array(fixed_point)
 
         target_center = np.array(target_center)
-
-        # # --------------------------------------------------------
-        # # approximate polygon size
-        # # --------------------------------------------------------
-
-        # bounds = polygon_bounds(polygon)
-
-        # width = bounds["east"] - bounds["west"]
-
-        # height = bounds["north"] - bounds["south"]
-
-        # polygon_sizes.append(
-        #     max(width, height) / 2
-        # )
 
         # --------------------------------------------------------
         # movable center
@@ -1251,6 +1241,63 @@ def CartogramFramework_global(
             spatial_deformation * center_term
         )
 
+    if topological_accuracy == 0.0:
+        pass
+    else:
+        for i in range(len(polygons)):
+            for j in range(i + 1, len(polygons)):
+                w_i = np.sqrt(target_areas[i])
+                w_j = np.sqrt(target_areas[j])
+
+                w = (w_i + w_j) / 2
+
+                x_i = centers[i][0]
+                y_i = centers[i][1]
+
+                x_j = centers[j][0]
+                y_j = centers[j][1]
+
+                h = cp.Variable(nonneg=True, name=f"h_{i}_{j}")
+                v = cp.Variable(nonneg=True, name=f"v_{i}_{j}")
+
+                dx = x_i - x_j
+                dy = y_i - y_j
+
+                constraints += [
+                    h >= dx,
+                    h >= -dx,
+
+                    v >= dy,
+                    v >= -dy,
+                ]
+
+                # constraints += [
+
+                #     x_j - x_i >= w,
+                #     y_j - y_i >= w,
+
+                # ]
+
+                constraints += [
+                    h >= cp.maximum(x_i - x_j, x_j - x_i) - w,
+                    v >= cp.maximum(y_i - y_j, y_j - y_i) - w
+                ]
+
+
+                pairwise_h[(i, j)] = h
+                pairwise_v[(i, j)] = v
+                
+                pairwise_distance_terms.append(h + v)
+        for i, j in horizontal_pairs:
+            constraints += [
+                centers[j][0] - centers[i][0] >= w
+            ]
+        for i, j in vertical_pairs:
+            constraints += [
+                centers[j][1] - centers[i][1] >= w
+            ]
+
+    distance_term = cp.sum(pairwise_distance_terms)
     
     objective = cp.Minimize(
 
@@ -1262,12 +1309,12 @@ def CartogramFramework_global(
 
         # + W_rel_dir * relative_direction_term
 
-        # + W_topology * topology_term
+        + W_topology * distance_term
     )
 
-    # ============================================================
+    # ------------------------------------------------------------
     # SOLVE
-    # ============================================================
+    # ------------------------------------------------------------
 
     prob = cp.Problem(
         objective,
@@ -1279,9 +1326,7 @@ def CartogramFramework_global(
         verbose=False
     )
 
-    # ============================================================
-    # EXTRACT RESULTS
-    # ============================================================
+    # get RESULTS
 
     new_polygons = []
 
