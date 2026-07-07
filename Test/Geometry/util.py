@@ -36,9 +36,7 @@ def plot_poly(points, title="Polygon", label_vertices=False):
     plt.show()
 
 
-def plot_polys(polygons, title="Polygons", plot_points=False, centroids=False, label_vertices=False, legend=True, target_centers=None):
-    import numpy as np
-    import matplotlib.pyplot as plt
+def plot_polys(polygons, title="Polygons", plot_points=False, centroids=False, label_vertices=False, legend=True, target_centers=None, names=None):
     
     plt.figure()
     
@@ -54,10 +52,22 @@ def plot_polys(polygons, title="Polygons", plot_points=False, centroids=False, l
         if plot_points:
             # edges
             plt.plot(poly[:,0], poly[:,1], marker='o')
-
+        
         if centroids:
             centroid = np.mean(points, axis=0)
             plt.plot(centroid[0], centroid[1], marker='*', color='red', markersize=5)
+
+        if names is not None and idx < len(names):
+            centroid = np.mean(points, axis=0)
+            area = polygon_areanp(points)
+            plt.text(
+                centroid[0],
+                centroid[1],
+                names[idx],
+                ha="center",
+                va="center",
+                fontsize=area
+            )
 
         if target_centers is not None:
             for tc in target_centers:
@@ -351,6 +361,53 @@ def PolyAreaRadialQP(points, target_area):
     return pts, actual_area
 
 
+def largest_polygon(geojson):
+    """
+    Given a GeoJSON Feature or geometry dict (Polygon or MultiPolygon),
+    returns a Feature with only the largest polygon.
+    Passes through plain Polygons unchanged.
+    """
+    if geojson.get("type") == "Feature":
+        geometry = geojson["geometry"]
+        properties = geojson.get("properties", {})
+    else:
+        geometry = geojson
+        properties = {}
+
+    if geometry["type"] == "Polygon":
+        return geojson  # nothing to do
+
+    if geometry["type"] != "MultiPolygon":
+        raise ValueError(f"Expected Polygon or MultiPolygon, got {geometry['type']}")
+
+    best = max(geometry["coordinates"], key=lambda poly: polygon_areanp(poly[0]))
+
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Polygon", "coordinates": best},
+        "properties": properties,
+    }
+
+def get_value(df, region, year):
+    # col = df.columns[df.iloc[2].eq(year)][0]
+    # row = df[df.iloc[:, 0] == region].index[0]
+    # return df.loc[row, col]
+    col = df.columns[df.iloc[2].astype(str).eq(year)][0]
+
+    mask = (
+        df.iloc[:, 0]
+        .astype(str)
+        .str.strip()
+        .str.lstrip(".")
+        .eq(region)
+    )
+
+    value = df.loc[mask, col].iloc[0]
+    return value
+
+
+
+
 def PolyAreaRadialLP(points, target_area, alpha=1):
     print(points)
     
@@ -461,7 +518,6 @@ def preprocess(polygons, target_areas, fixed_points, cartographic_error, target_
     return polygons, target_areas, fixed_points, cartographic_error, target_centers
 
 
-import numpy as np
 
 
 def make_circle(center, area, n=100):
@@ -568,25 +624,72 @@ def polygon_bounds(poly):
     return bounds
 
 
-def disjoint_pairs_horizontal_and_vertical(polygons):
-    """
-    Return two lists of index pairs (i, j) with i < j:
-      - horizontal_pairs : polygons whose longitude intervals do NOT overlap
-      - vertical_pairs   : polygons whose latitude intervals do NOT overlap
-    """
-    bounds = [polygon_bounds(p) for p in polygons]
+# def disjoint_pairs_horizontal_and_vertical(polygons):
+#     """
+#     Return two lists of index pairs (i, j) with i < j:
+#       - horizontal_pairs : polygons whose longitude intervals do NOT overlap
+#       - vertical_pairs   : polygons whose latitude intervals do NOT overlap
+#       Both directions tho
+#     """
+#     bounds = [polygon_bounds(p) for p in polygons]
 
+#     horizontal_pairs = []
+#     vertical_pairs = []
+
+#     for i in range(len(bounds)):
+#         for j in range(len(bounds)):
+#             if i == j:
+#                 continue
+#             if bounds[i]['east'] < bounds[j]['west'] or bounds[j]['east'] < bounds[i]['west']:
+#                 horizontal_pairs.append((i, j))
+#             if bounds[i]['north'] < bounds[j]['south'] or bounds[j]['north'] < bounds[i]['south']:
+#                 vertical_pairs.append((i, j))
+
+#     return horizontal_pairs, vertical_pairs
+
+def disjoint_pairs_horizontal_and_vertical(polygons):
+    """Only one direction so either A-B or B-A, not both"""
+    bounds = [polygon_bounds(p) for p in polygons]
     horizontal_pairs = []
     vertical_pairs = []
-
     for i in range(len(bounds)):
-        for j in range(len(bounds)):
-            if i == j:
-                continue
-            if bounds[i]['east'] < bounds[j]['west'] or bounds[j]['east'] < bounds[i]['west']:
+        for j in range(i + 1, len(bounds)):  # ← len(bounds), not n
+            b_i, b_j = bounds[i], bounds[j]
+
+            if b_i['east'] < b_j['west']:
                 horizontal_pairs.append((i, j))
-            if bounds[i]['north'] < bounds[j]['south'] or bounds[j]['north'] < bounds[i]['south']:
+            elif b_j['east'] < b_i['west']:
+                horizontal_pairs.append((j, i))
+
+            if b_i['north'] < b_j['south']:
                 vertical_pairs.append((i, j))
+            elif b_j['north'] < b_i['south']:
+                vertical_pairs.append((j, i))
+
+    return horizontal_pairs, vertical_pairs
+
+def disjoint_pairs_horizontal_and_vertical_center(polygons):
+    # Use centroids, not bounding boxes
+    centroids = [np.mean(np.asarray(p), axis=0) for p in polygons]
+    horizontal_pairs = []
+    vertical_pairs = []
+    for i in range(len(centroids)):
+        for j in range(i + 1, len(centroids)):
+            dx = centroids[j][0] - centroids[i][0]  # positive = j is right of i
+            dy = centroids[j][1] - centroids[i][1]  # positive = j is above i
+
+            if abs(dx) >= abs(dy):
+                # Primarily horizontal separation
+                if dx >= 0:
+                    horizontal_pairs.append((i, j))  # i left of j
+                else:
+                    horizontal_pairs.append((j, i))  # j left of i
+            else:
+                # Primarily vertical separation
+                if dy >= 0:
+                    vertical_pairs.append((i, j))    # i below j
+                else:
+                    vertical_pairs.append((j, i))    # j below i
 
     return horizontal_pairs, vertical_pairs
 
@@ -652,338 +755,6 @@ def shared_vertices_of_neighbors(polygons, tolerance=1e-8):
     return result
 
 
-def PolyAreaRadialLP_all(polygons, target_areas, fixed_points = None, shape = "original", cartographic_error=1, shape_preservation=0):
-    """
-    polygons: either a single polygon P (list of vertices {v1, v2, . . . , vn}) or a list of polygons {P1, P2, . . . , Pk} (list of list of vertices)
-    target_areas: desired area for each polygon (can be a single value or a list of values)
-    cartographic_error: weight for shape preservation 
-    """
-
-    polygons, target_areas, fixed_points, cartographic_error = preprocess(polygons, target_areas, fixed_points, cartographic_error)
-
-    new_polygons = []
-    actual_areas = []
-
-    for polygon, area, fixed_point in zip(polygons, target_areas, fixed_points):
-        # print(f"Type of fixed_point: {type(fixed_point)}")
-        # print(f"fixed_point: {fixed_point}")
-        # print(f"Type of polygon: {type(polygon)}")
-        # X = np.array(polygon)
-        # centroid = np.mean(X, axis=0)
-        n = len(polygon)
-
-        constraints = []
-        
-        t = cp.Variable(n)
-        z = cp.Variable(n)  # abs values
-        
-        new_pts = fixed_point + cp.multiply(t[:, None], (polygon - fixed_point))
-
-        if shape == "circle":
-            # Enabling circle-like shapes by adding a term that encourages uniform scaling of the vertices
-            r = np.linalg.norm(polygon - fixed_point, axis=1)
-            new_radii = cp.multiply(t, r)
-            circle_term = cp.sum_squares(new_radii - cp.mean(new_radii))
-
-        elif shape == "square":
-            # Enabling square-like shapes by adding a term that encourages vertices to align with the axes
-            centered = new_pts - fixed_point
-            u = cp.Variable(n)
-            v = cp.Variable(n)
-            d = cp.Variable(n)
-
-            constraints += [
-                u >= centered[:, 0],
-                u >= -centered[:, 0],
-
-                v >= centered[:, 1],
-                v >= -centered[:, 1],
-
-                d >= u - v,
-                d >= v - u
-            ]
-
-            square_term = cp.sum_squares(d)
-            # abs_x = cp.abs(centered[:, 0])
-            # abs_y = cp.abs(centered[:, 1])
-            # square_term = cp.sum(cp.abs(abs_x - abs_y))
-            # square_term = cp.sum_squares(cp.minimum(abs_x, abs_y))
-        
-        A0 = polygon_areanp(polygon)
-        s = np.sqrt(area / A0)
-        
-        constraints += [
-            cp.mean(t) == s,
-            t >= 0.1,
-            
-            # |t - 1| <= z
-            t - 1 <= z,
-            -(t - 1) <= z
-        ]
-
-        l1_term = cp.sum(z)
-        l2_term = cp.sum_squares(t - 1)
-
-        preservation_term = (1 - shape_preservation) * l1_term + shape_preservation * l2_term
-        shape_term = 0
-        if shape == "circle":
-            shape_term = (1 - shape_preservation) * circle_term
-
-        elif shape == "square":
-            shape_term = (1 - shape_preservation) * square_term
-        
-        obj = cp.Minimize(shape_preservation * preservation_term + (1 - shape_preservation) * shape_term)
-        
-        prob = cp.Problem(obj, constraints)
-        prob.solve()
-        
-        pts = new_pts.value
-        new_polygons.append(pts)
-        actual_areas.append(polygon_areanp(pts))
-
-    return new_polygons, actual_areas
-
-
-
-
-
-
-
-def PolyAreaRadialLP_all_demers(
-    polygons, 
-    target_areas, 
-    fixed_points = None, 
-    shape = "original", 
-
-    target_centers=None,
-    horizontal_pairs=None,
-    vertical_pairs=None,
-    neighboring_pairs=None,
-    shared_vertices_of_neighbors=None,
-    
-    # quality criteria (1 is good, 0 is bad (error is present))
-    cartographic_error=1.0, # Region size like statistical value
-    shape_deformation=0.0, # Region shape preserved
-    relative_direction=1.0, # west is west etc.
-    topological_accuracy=1.0, # neigboorhood preservation
-    spatial_deformation=1.0, # center over center
-    global_shape=1.0, # Only evaluation
-    local_shape=1.0, # Only evaluation
-    complexity=1.0, # Only evaluation
-    data_ink_ratio=1.0, # Only evaluation
-    ):
-    """
-    Parameters
-    ----------
-    polygons : list
-        Single polygon or list of polygons.
-
-    target_areas : float or list
-        Desired target area(s).
-
-    fixed_points : list or None
-        Radial centers.
-
-    shape : str
-        "original", "circle", or "square"
-
-    All quality criteria weights are in [0,1].
-
-    Larger weight => criterion is more important.
-    """
-
-    polygons, target_areas, fixed_points, cartographic_error, target_centers = preprocess(
-        polygons, 
-        target_areas, 
-        fixed_points, 
-        cartographic_error,
-        target_centers
-    )
-
-    # ------------------------------------------------------------------
-    # normalize weights
-    # ------------------------------------------------------------------
-
-    weights = np.array([
-        shape_deformation,
-        relative_direction,
-        topological_accuracy,
-        spatial_deformation,
-        global_shape,
-        local_shape,
-        complexity,
-        data_ink_ratio,
-        cartographic_error
-    ], dtype=float)
-
-    weights = weights / (np.sum(weights) + 1e-12)
-
-    (
-        W_shape_def,
-        W_rel_dir,
-        W_topology,
-        W_spatial,
-        W_global,
-        W_local,
-        W_complexity,
-        W_dataink,
-        W_area
-    ) = weights
-
-    new_polygons = []
-    actual_areas = []
-
-    for polygon, target_area, fixed_point, target_center in zip(
-        polygons, 
-        target_areas, 
-        fixed_points,
-        target_centers
-    ):
-        # print(f"Polygon: {polygon}")
-        if shape == "circle" and shape_deformation == 0.0:
-            polygon = make_circle(np.mean(np.array(polygon), axis=0), target_area, n=100)
-        elif shape == "square" and shape_deformation == 0.0:
-            polygon = make_square(np.mean(np.array(polygon), axis=0), target_area, n=100)
-        else:
-            polygon = np.array(polygon)
-        fixed_point = np.array(fixed_point)
-        target_center = np.array(target_center)
-
-        center_shift = cp.Variable(2)
-        moving_center = fixed_point + center_shift
-
-        n = len(polygon)
-
-        # --------------------------------------------------------------
-        # variables
-        # --------------------------------------------------------------
-
-        t = cp.Variable(n)
-        # L1 auxiliary variables
-        z = cp.Variable(n, nonneg=True)  # abs values / Non-negative
-        # radial deformation
-        directions = polygon - fixed_point
-        new_pts = moving_center + cp.multiply(
-            t[:, None], 
-            directions
-        )
-        constraints = []
-        min_scale = (
-            0.01
-            + 0.24 * shape_deformation
-        )
-        
-        # --------------------------------------------------------------
-        # target area scaling
-        # --------------------------------------------------------------
-
-        A0 = polygon_areanp(polygon)
-        if A0 <= 1e-12:
-            continue
-        s = np.sqrt(target_area / A0)
-        
-        # constraints += [t >= min_scale]
-
-        constraints += [
-            cp.mean(t) == s,
-            t >= min_scale,
-            
-            # |t - 1| <= z
-            t - 1 <= z,
-            -(t - 1) <= z
-        ]
-
-        # --------------------------------------------------------------
-        # 1. SHAPE DEFORMATION
-        # --------------------------------------------------------------
-
-        l1_term = cp.sum(z)
-        l2_term = cp.sum_squares(t - 1)
-
-        shape_def_term = (
-            (1 - shape_deformation) * l1_term + 
-            shape_deformation * l2_term
-        )
-
-        # --------------------------------------------------------------
-# TARGET SHAPE TERM (circle / square)
-        # --------------------------------------------------------------
-
-        shape_term = 0
-
-        radial_norms = np.linalg.norm(
-            directions,
-            axis=1
-        )
-
-        if shape == "circle":
-            new_radii = cp.multiply(t, radial_norms)
-            shape_term += cp.sum_squares(
-                new_radii - cp.mean(new_radii)
-            )
-
-        elif shape == "square":
-            M = np.maximum(np.abs(directions[:, 0]), np.abs(directions[:, 1]))
-            r = cp.Variable(nonneg=True)
-            shape_term = cp.sum_squares(cp.multiply(t, M) - r)
-
-        # elif shape == "square":
-        #     # Enabling square-like shapes by adding a term that encourages vertices to align with the axes
-        #     centered = new_pts - fixed_point
-        #     u = cp.Variable(n, nonneg=True)
-        #     v = cp.Variable(n, nonneg=True)
-        #     d = cp.Variable(n, nonneg=True)
-        #     r = cp.Variable(nonneg=True)
-        #     m = cp.Variable(n, nonneg=True)
-
-        #     constraints += [
-        #         u >= centered[:, 0],
-        #         u >= -centered[:, 0],
-
-        #         v >= centered[:, 1],
-        #         v >= -centered[:, 1],
-
-        #         d >= u - v,
-        #         d >= v - u,
-
-        #         m >= u,
-        #         m >= v
-        #     ]
-
-        #     shape_term += cp.sum_squares(d)
-        #     # shape_term += cp.sum_squares(m-r)
-        
-        area_error = cp.square(cp.mean(t) - s)   # convex quadratic penalty
-
-        center_term = cp.sum_squares(
-            moving_center - target_center
-        )
-
-        objective = cp.Minimize(
-            shape_deformation * shape_def_term +
-            (1 - shape_deformation) * shape_term +
-            cartographic_error * area_error +
-            spatial_deformation * center_term
-        )
-        
-
-        # shape_term = 0
-        # if shape == "circle":
-        #     shape_term = (1 - shape_deformation) * circle_term
-
-        # elif shape == "square":
-        #     shape_term = (1 - shape_deformation) * square_term
-        
-        # obj = cp.Minimize(shape_deformation * preservation_term + (1 - shape_deformation) * shape_term)
-        
-        prob = cp.Problem(objective, constraints)
-        prob.solve()
-        
-        pts = new_pts.value
-        new_polygons.append(pts)
-        actual_areas.append(polygon_areanp(pts))
-
-    return new_polygons, actual_areas, 1, 1
 
 
 
@@ -1353,11 +1124,11 @@ def CartogramFramework_global(
 
 
 
-def PolyAreaRadialLP_all_demers_new(
-    polygons,
-    target_areas,
-    fixed_points=None,
-    shape="original",
+def CartogramFramework_global_CLAUDE(
+    polygons, 
+    target_areas, 
+    fixed_points=None, 
+    shape="original", 
 
     target_centers=None,
     horizontal_pairs=None,
@@ -1365,7 +1136,14 @@ def PolyAreaRadialLP_all_demers_new(
     neighboring_pairs=None,
     shared_vertices_of_neighbors=None,
 
-    # weights
+    # slope parameter for diagonal distance d_ij
+    alpha=1.0,
+    # small constant for non-adjacent gap
+    epsilon=1e-2,
+    # small constant b for b_ij = b * a_ij
+    b=1e-2,
+
+    # quality criteria (1 is good, 0 is bad)
     cartographic_error=1.0,
     shape_deformation=0.0,
     relative_direction=1.0,
@@ -1376,68 +1154,13 @@ def PolyAreaRadialLP_all_demers_new(
     complexity=1.0,
     data_ink_ratio=1.0,
 ):
-    """
-    Hybrid Radial + Demers Cartogram Optimization
 
-    Features:
-    ----------
-    - Radial polygon deformation
-    - Area scaling
-    - Shape preservation
-    - Relative direction preservation
-    - Approximate topology preservation
-    - Demers-style polygon repulsion
-    - Target-center attraction
-
-    IMPORTANT:
-    ----------
-    This solves ONE GLOBAL optimization problem.
-    """
-
-    # ============================================================
-    # preprocess
-    # ============================================================
-
-    polygons, target_areas, fixed_points, cartographic_error, target_centers = preprocess(
+    (
         polygons,
         target_areas,
         fixed_points,
         cartographic_error,
-        target_centers
-    )
-
-    n_polys = len(polygons)
-
-    # ============================================================
-    # pair generation
-    # ============================================================
-
-    if horizontal_pairs is None or vertical_pairs is None:
-        horizontal_pairs, vertical_pairs = \
-            disjoint_pairs_horizontal_and_vertical(polygons)
-
-    if neighboring_pairs is None:
-        neighboring_pairs = neighbouring_pairs(polygons)
-
-    # ============================================================
-    # normalize weights
-    # ============================================================
-
-    weights = np.array([
-        shape_deformation,
-        relative_direction,
-        topological_accuracy,
-        spatial_deformation,
-        global_shape,
-        local_shape,
-        complexity,
-        data_ink_ratio,
-        cartographic_error
-    ], dtype=float)
-
-    weights = weights / (np.sum(weights) + 1e-12)
-
-    (
+        target_centers,
         W_shape_def,
         W_rel_dir,
         W_topology,
@@ -1447,11 +1170,329 @@ def PolyAreaRadialLP_all_demers_new(
         W_complexity,
         W_dataink,
         W_area
-    ) = weights
+    ) = preprocess_global(
+        polygons,
+        target_areas,
+        fixed_points,
+        cartographic_error,
+        target_centers,
+        shape_deformation,
+        relative_direction,
+        topological_accuracy,
+        spatial_deformation,
+        global_shape,
+        local_shape,
+        complexity,
+        data_ink_ratio,
+    )
 
-    # ============================================================
-    # global containers
-    # ============================================================
+    # ----------------------------------------------------------
+    # Build adjacency lookup from neighboring_pairs
+    # ----------------------------------------------------------
+
+    adjacent_set = set()
+    if neighboring_pairs is not None:
+        for i, j in neighboring_pairs:
+            adjacent_set.add((min(i, j), max(i, j)))
+
+    def is_adjacent(i, j):
+        return (min(i, j), max(i, j)) in adjacent_set
+
+    # ----------------------------------------------------------
+    # gap_ij  (eq. 12):  0 if adjacent, ε if not
+    # b_ij    (table):   b * a_ij  where a_ij = 1 if adjacent, 0.1 if not
+    # ----------------------------------------------------------
+
+    def gap(i, j):
+        return 0.0 if is_adjacent(i, j) else epsilon
+
+    def a_ij(i, j):
+        return 1.0 if is_adjacent(i, j) else 0.1
+
+    def b_ij(i, j):
+        return b * a_ij(i, j)
+
+    constraints = []
+    centers = []
+    new_polygon_exprs = []
+
+    shape_terms = []
+    area_terms = []
+    center_terms = []
+
+    pairwise_distance_terms = []
+    pairwise_h = {}
+    pairwise_v = {}
+
+    original_centers = [
+        np.mean(np.array(poly), axis=0)
+        for poly in polygons
+    ]
+
+    for polygon, target_area, fixed_point, target_center in zip(
+        polygons, target_areas, fixed_points, target_centers
+    ):
+        polygon = np.array(polygon)
+
+        if shape == "circle" and shape_deformation == 0.0:
+            polygon = make_circle(np.mean(polygon, axis=0), target_area, n=100)
+        elif shape == "square" and shape_deformation == 0.0:
+            polygon = make_square(np.mean(polygon, axis=0), target_area, n=100)
+
+        fixed_point  = np.array(fixed_point)
+        target_center = np.array(target_center)
+
+        # --------------------------------------------------------
+        # Movable center  (eq. 3):  m_i = c_i + Δ_i
+        # --------------------------------------------------------
+
+        center_shift = cp.Variable(2)
+        moving_center = fixed_point + center_shift
+        centers.append(moving_center)
+
+        # --------------------------------------------------------
+        # Radial deformation variables
+        # --------------------------------------------------------
+
+        n = len(polygon)
+        t = cp.Variable(n)
+        z = cp.Variable(n, nonneg=True)
+
+        directions = polygon - fixed_point
+
+        new_pts = moving_center + cp.multiply(t[:, None], directions)
+        new_polygon_exprs.append(new_pts)
+
+        # --------------------------------------------------------
+        # Target scaling  (eq. 1):  s_i = sqrt(Â_i / A_i)
+        # --------------------------------------------------------
+
+        A0 = polygon_areanp(polygon)
+        if A0 <= 1e-12:
+            continue
+
+        s = np.sqrt(target_area / A0)
+
+        min_scale = 0.01 + 0.24 * shape_deformation
+
+        constraints += [
+            cp.mean(t) == s,          # eq. 4
+            t >= min_scale,           # eq. 5
+            t - 1 <= z,               # eq. 6
+            -(t - 1) <= z,            # eq. 7
+        ]
+
+        # --------------------------------------------------------
+        # Shape deformation term
+        # --------------------------------------------------------
+
+        l1_term = cp.sum(z)
+        l2_term = cp.sum_squares(t - 1)
+
+        shape_def_term = (
+            (1 - shape_deformation) * l1_term +
+            shape_deformation * l2_term
+        )
+
+        # --------------------------------------------------------
+        # Target shape term (circle / square)
+        # --------------------------------------------------------
+
+        shape_term = 0
+        radial_norms = np.linalg.norm(directions, axis=1)
+
+        if shape == "circle":                              # eq. 20
+            new_radii = cp.multiply(t, radial_norms)
+            shape_term += cp.sum_squares(new_radii - cp.mean(new_radii))
+
+        elif shape == "square":                            # eq. 18–19
+            M = np.maximum(
+                np.abs(directions[:, 0]),
+                np.abs(directions[:, 1])
+            )
+            r = cp.Variable(nonneg=True)
+            shape_term += cp.sum_squares(cp.multiply(t, M) - r)
+
+        # --------------------------------------------------------
+        # Area error
+        # --------------------------------------------------------
+
+        area_error = cp.square(cp.mean(t) - s)
+
+        # --------------------------------------------------------
+        # Center attraction  (spatial deformation)
+        # --------------------------------------------------------
+
+        center_term = cp.sum_squares(moving_center - target_center)
+
+        # --------------------------------------------------------
+        # Collect per-region objective terms
+        # --------------------------------------------------------
+
+        shape_terms.append(
+            shape_deformation * shape_def_term +
+            (1 - shape_deformation) * shape_term
+        )
+        area_terms.append(cartographic_error * area_error)
+        center_terms.append(spatial_deformation * center_term)
+
+    # ----------------------------------------------------------
+    # Pairwise topology terms  (eqs. 8–16)
+    # ----------------------------------------------------------
+
+    if topological_accuracy != 0.0:
+
+        n_regions = len(polygons)
+
+        for i in range(n_regions):
+            for j in range(i + 1, n_regions):
+
+                w_i = np.sqrt(target_areas[i])
+                w_j = np.sqrt(target_areas[j])
+                w   = (w_i + w_j) / 2          # eq. 8  w_ij
+
+                g   = gap(i, j)                 # eq. 12 gap_ij
+
+                x_i = centers[i][0]
+                y_i = centers[i][1]
+                x_j = centers[j][0]
+                y_j = centers[j][1]
+
+                h = cp.Variable(nonneg=True, name=f"h_{i}_{j}")
+                v = cp.Variable(nonneg=True, name=f"v_{i}_{j}")
+
+                # ------------------------------------------------
+                # Diagonal distance d_ij (table):
+                #   d_ij = |(y_i + α(x_i - x_j)) - y_j|
+                # Linearised with an auxiliary slack variable.
+                # ------------------------------------------------
+
+                d_var  = cp.Variable(nonneg=True, name=f"d_{i}_{j}")
+                diag   = y_i + alpha * (x_i - x_j) - y_j   # affine expression
+
+                constraints += [
+                    d_var >=  diag,
+                    d_var >= -diag,
+                ]
+
+                # b_ij scales the diagonal penalty
+                bij = b_ij(i, j)
+
+                # ------------------------------------------------
+                # H / V ordering constraints with gap  (eqs. 13–16)
+                # ------------------------------------------------
+
+                if horizontal_pairs is not None:
+                    if (i, j) in horizontal_pairs:          # eq. 13
+                        constraints += [x_j - x_i >= w + g]
+
+                if vertical_pairs is not None:
+                    if (i, j) in vertical_pairs:            # eq. 14
+                        constraints += [y_j - y_i >= w + g]
+
+                # Pairwise separation for ALL pairs  (eqs. 15–16)
+                constraints += [
+                    h >= cp.maximum(x_i - x_j, x_j - x_i) - w + g,
+                    v >= cp.maximum(y_i - y_j, y_j - y_i) - w + g,
+                ]
+
+                pairwise_h[(i, j)] = h
+                pairwise_v[(i, j)] = v
+
+                # diagonal term weighted by b_ij
+                pairwise_distance_terms.append(h + v + bij * d_var)
+
+    distance_term = cp.sum(pairwise_distance_terms) if pairwise_distance_terms else 0
+
+    # ----------------------------------------------------------
+    # Objective  (eq. 21)
+    # ----------------------------------------------------------
+
+    objective = cp.Minimize(
+        W_shape_def * cp.sum(shape_terms)
+        + W_area     * cp.sum(area_terms)
+        + W_spatial  * cp.sum(center_terms)
+        + W_topology * distance_term
+    )
+
+    # ----------------------------------------------------------
+    # Solve
+    # ----------------------------------------------------------
+
+    prob = cp.Problem(objective, constraints)
+    prob.solve(solver=cp.CLARABEL, verbose=False)
+
+    new_polygons  = []
+    actual_areas  = []
+
+    print(prob.status)
+
+    for poly_expr in new_polygon_exprs:
+        pts = poly_expr.value
+        new_polygons.append(pts)
+        actual_areas.append(polygon_areanp(pts))
+
+    return (new_polygons, actual_areas, prob.status, prob.value)
+
+
+
+
+
+
+def Cartogram_Framework_Template(
+    polygons, 
+    target_areas, 
+    fixed_points = None, 
+    shape = "original", 
+
+    target_centers=None,
+    horizontal_pairs=None,
+    vertical_pairs=None,
+    neighboring_pairs=None,
+    shared_vertices_of_neighbors=None,
+    
+    # quality criteria (1 is good, 0 is bad (error is present))
+    cartographic_error=1.0, # Region size like statistical value
+    shape_deformation=0.0, # Region shape preserved
+    relative_direction=1.0, # west is west etc.
+    topological_accuracy=1.0, # neigboorhood preservation
+    spatial_deformation=1.0, # center over center
+    global_shape=1.0, # Only evaluation
+    local_shape=1.0, # Only evaluation
+    complexity=1.0, # Only evaluation
+    data_ink_ratio=1.0, # Only evaluation
+    ):
+
+    (
+        polygons,
+        target_areas,
+        fixed_points,
+        cartographic_error,
+        target_centers,
+        W_shape_def,
+        W_rel_dir,
+        W_topology,
+        W_spatial,
+        W_global,
+        W_local,
+        W_complexity,
+        W_dataink,
+        W_area
+    ) = preprocess_global(
+        polygons,
+        target_areas,
+        fixed_points,
+        cartographic_error,
+        target_centers,
+        shape_deformation,
+        relative_direction,
+        topological_accuracy,
+        spatial_deformation,
+        global_shape,
+        local_shape,
+        complexity,
+        data_ink_ratio,
+    )   
 
     constraints = []
 
@@ -1463,23 +1504,19 @@ def PolyAreaRadialLP_all_demers_new(
     area_terms = []
     center_terms = []
 
+    pairwise_distance_terms = []
+    pairwise_h = {}
+    pairwise_v = {}
+
     relative_direction_term = 0
     topology_term = 0
 
     polygon_sizes = []
 
-    # ============================================================
-    # original centers
-    # ============================================================
-
     original_centers = [
         np.mean(np.array(poly), axis=0)
         for poly in polygons
     ]
-
-    # ============================================================
-    # build polygon variables
-    # ============================================================
 
     for polygon, target_area, fixed_point, target_center in zip(
         polygons,
@@ -1494,284 +1531,331 @@ def PolyAreaRadialLP_all_demers_new(
         # optional target shape
         # --------------------------------------------------------
 
-        if shape == "circle":
+        if shape == "circle" and shape_deformation == 0.0:
             polygon = make_circle(
                 np.mean(polygon, axis=0),
                 target_area,
                 n=100
             )
 
-        elif shape == "square":
+        elif shape == "square" and shape_deformation == 0.0:
             polygon = make_square(
                 np.mean(polygon, axis=0),
                 target_area,
                 n=100
             )
 
-        fixed_point = np.array(fixed_point)
+    print(f"polygons type: {type(polygons)}")
+    print(f"target_areas type: {type(target_areas)}")
+    print(f"fixed_points type: {type(fixed_points)}")
+    print(f"shape: {shape}")
+    print(f"target_centers type: {type(target_centers)}")
+    print(f"horizontal_pairs type: {type(horizontal_pairs)}")
+    print(f"vertical_pairs type: {type(vertical_pairs)}")
+    print(f"neighboring_pairs type: {type(neighboring_pairs)}")
+    print(f"shared_vertices_of_neighbors type: {type(shared_vertices_of_neighbors)}")
 
-        target_center = np.array(target_center)
 
-        # --------------------------------------------------------
-        # approximate polygon size
-        # --------------------------------------------------------
 
-        bounds = polygon_bounds(polygon)
 
-        width = bounds["east"] - bounds["west"]
 
-        height = bounds["north"] - bounds["south"]
 
-        polygon_sizes.append(
-            max(width, height) / 2
+
+def Cartogram_Framework_Template_ALPHA(
+    polygons,
+    target_areas,
+    fixed_points=None,
+    shape="original",
+    target_centers=None,
+    horizontal_pairs=None,
+    vertical_pairs=None,
+    neighboring_pairs=None,
+    shared_vertices_of_neighbors=None,
+
+    # quality criteria (1 is good, 0 is bad (error is present))
+    cartographic_error=1.0, # Region size like statistical value
+    shape_deformation=0.0, # Region shape preserved
+    relative_direction=1.0, # west is west etc.
+    topological_accuracy=1.0, # neigboorhood preservation
+    spatial_deformation=1.0, # center over center
+    global_shape=1.0, # Only evaluation
+    local_shape=1.0, # Only evaluation
+    complexity=1.0, # Only evaluation
+    data_ink_ratio=1.0, # Only evaluation
+    ):
+
+    (
+        polygons,
+        target_areas,
+        fixed_points,
+        cartographic_error,
+        target_centers,
+    ) = preprocess(
+        polygons,
+        target_areas,
+        fixed_points,
+        cartographic_error,
+        target_centers,
+    )
+
+    n_regions = len(polygons)
+
+    if horizontal_pairs is None:
+        horizontal_pairs = []
+
+    if vertical_pairs is None:
+        vertical_pairs = []
+
+    if neighboring_pairs is None:
+        neighboring_pairs = []
+
+    # ---------------------------------------------------------
+    # Parameters
+    # ---------------------------------------------------------
+
+    gamma = shape_deformation
+
+    lambda_a = cartographic_error
+    lambda_c = spatial_deformation
+    lambda_t = topological_accuracy
+
+    eps_gap = 0.1
+    t_min = 0.05
+
+    constraints = []
+    objective_terms = []
+
+    moving_centers = []
+    t_vars = []
+    new_vertices_expr = []
+
+    original_areas = []
+
+    # ---------------------------------------------------------
+    # Region variables
+    # ---------------------------------------------------------
+
+    for i, polygon in enumerate(polygons):
+
+        polygon = np.asarray(polygon)
+
+        n_i = len(polygon)
+
+        c_i = np.mean(polygon, axis=0)
+
+        original_areas.append(
+            polygon_areanp(polygon)
         )
 
-        # --------------------------------------------------------
-        # movable center
-        # --------------------------------------------------------
+        A_i = original_areas[-1]
+        Ahat_i = target_areas[i]
 
-        center_shift = cp.Variable(2)
+        s_i = np.sqrt(Ahat_i / A_i)
 
-        moving_center = fixed_point + center_shift
+        # moving center
+        m_i = cp.Variable(2)
 
-        centers.append(moving_center)
+        # radial scaling
+        t_i = cp.Variable(n_i)
 
-        # --------------------------------------------------------
-        # radial deformation variables
-        # --------------------------------------------------------
+        # abs deformation
+        z_i = cp.Variable(n_i, nonneg=True)
 
-        n = len(polygon)
-
-        t = cp.Variable(n)
-
-        z = cp.Variable(n, nonneg=True)
-
-        directions = polygon - fixed_point
-
-        new_pts = moving_center + cp.multiply(
-            t[:, None],
-            directions
-        )
-
-        new_polygon_exprs.append(new_pts)
-
-        # --------------------------------------------------------
-        # target scaling
-        # --------------------------------------------------------
-
-        A0 = polygon_areanp(polygon)
-
-        if A0 <= 1e-12:
-            continue
-
-        s = np.sqrt(target_area / A0)
-
-        min_scale = (
-            0.01
-            + 0.24 * shape_deformation
-        )
+        moving_centers.append(m_i)
+        t_vars.append(t_i)
 
         constraints += [
-
-            cp.mean(t) == s,
-
-            t >= min_scale,
-
-            # absolute value linearization
-            t - 1 <= z,
-            -(t - 1) <= z
+            t_i >= t_min
         ]
 
-        # --------------------------------------------------------
-        # shape deformation term
-        # --------------------------------------------------------
+        constraints += [
+            t_i - 1 <= z_i,
+            -(t_i - 1) <= z_i,
+        ]
 
-        l1_term = cp.sum(z)
+        # -----------------------------------------------------
+        # New vertices
+        # -----------------------------------------------------
 
-        l2_term = cp.sum_squares(t - 1)
+        verts = []
 
-        shape_def_term = (
-            (1 - shape_deformation) * l1_term +
-            shape_deformation * l2_term
-        )
+        for k in range(n_i):
 
-        # --------------------------------------------------------
-        # target shape term
-        # --------------------------------------------------------
+            v = polygon[k]
+
+            expr = (
+                m_i
+                + t_i[k] * (v - c_i)
+            )
+
+            verts.append(expr)
+
+        new_vertices_expr.append(verts)
+
+        # -----------------------------------------------------
+        # Shape objective
+        # -----------------------------------------------------
 
         shape_term = 0
 
-        radial_norms = np.linalg.norm(
-            directions,
-            axis=1
-        )
-
         if shape == "circle":
 
-            new_radii = cp.multiply(
-                t,
-                radial_norms
+            radii = np.linalg.norm(
+                polygon - c_i,
+                axis=1
             )
 
-            shape_term += cp.sum_squares(
-                new_radii - cp.mean(new_radii)
+            mean_radius = (
+                cp.sum(
+                    cp.multiply(
+                        t_i,
+                        radii
+                    )
+                ) / n_i
+            )
+
+            shape_term = cp.sum_squares(
+                cp.multiply(t_i, radii)
+                - mean_radius
             )
 
         elif shape == "square":
 
             M = np.maximum(
-                np.abs(directions[:, 0]),
-                np.abs(directions[:, 1])
+                np.abs(
+                    polygon[:, 0] - c_i[0]
+                ),
+                np.abs(
+                    polygon[:, 1] - c_i[1]
+                ),
             )
 
-            r = cp.Variable(nonneg=True)
+            r_i = cp.Variable(nonneg=True)
 
-            shape_term += cp.sum_squares(
-                cp.multiply(t, M) - r
+            shape_term = cp.sum_squares(
+                cp.multiply(t_i, M)
+                - r_i
             )
 
-        # --------------------------------------------------------
-        # area error
-        # --------------------------------------------------------
+        # -----------------------------------------------------
+        # Mean-scale area term
+        # -----------------------------------------------------
 
-        area_error = cp.square(
-            cp.mean(t) - s
+        area_term = cp.square(
+            cp.sum(t_i) / n_i
+            - s_i
         )
 
-        # --------------------------------------------------------
-        # center attraction
-        # --------------------------------------------------------
+        # -----------------------------------------------------
+        # Center term
+        # -----------------------------------------------------
 
         center_term = cp.sum_squares(
-            moving_center - target_center
+            m_i - target_centers[i]
         )
 
-        # --------------------------------------------------------
-        # collect objective terms
-        # --------------------------------------------------------
+        # -----------------------------------------------------
+        # Shape regularizer
+        # -----------------------------------------------------
 
-        shape_terms.append(
-            shape_deformation * shape_def_term +
-            (1 - shape_deformation) * shape_term
+        deform_term = (
+            gamma * (
+                (1 - gamma) * cp.sum(z_i)
+                + gamma * cp.sum_squares(t_i - 1)
+            )
+            + (1 - gamma) * shape_term
         )
 
-        area_terms.append(
-            cartographic_error * area_error
+        objective_terms.append(
+            deform_term
+            + lambda_a * area_term
+            + lambda_c * center_term
         )
 
-        center_terms.append(
-            spatial_deformation * center_term
-        )
+    # ---------------------------------------------------------
+    # Pairwise topology constraints
+    # ---------------------------------------------------------
 
-    # ============================================================
-    # DEMERS-STYLE REPULSION
-    # ============================================================
+    x = [m[0] for m in moving_centers]
+    y = [m[1] for m in moving_centers]
 
-    # horizontal separation
+    neighbor_set = {
+        tuple(sorted(p))
+        for p in neighboring_pairs
+    }
+
+    topology_penalty = 0
+
+    # horizontal ordering
 
     for i, j in horizontal_pairs:
 
-        min_dist = (
-            polygon_sizes[i]
-            + polygon_sizes[j]
+        w_ij = (
+            np.sqrt(target_areas[i])
+            + np.sqrt(target_areas[j])
+        ) / 2
+
+        gap = (
+            0
+            if tuple(sorted((i, j))) in neighbor_set
+            else eps_gap
         )
 
         constraints += [
-
-            centers[j][0] - centers[i][0]
-            >= min_dist
+            x[j] - x[i]
+            >= w_ij + gap
         ]
 
-    # vertical separation
+    # vertical ordering
 
     for i, j in vertical_pairs:
 
-        min_dist = (
-            polygon_sizes[i]
-            + polygon_sizes[j]
+        w_ij = (
+            np.sqrt(target_areas[i])
+            + np.sqrt(target_areas[j])
+        ) / 2
+
+        gap = (
+            0
+            if tuple(sorted((i, j))) in neighbor_set
+            else eps_gap
         )
 
         constraints += [
-
-            centers[j][1] - centers[i][1]
-            >= min_dist
+            y[j] - y[i]
+            >= w_ij + gap
         ]
 
-    # ============================================================
-    # RELATIVE DIRECTION PRESERVATION
-    # ============================================================
-
-    for i in range(n_polys):
-
-        for j in range(i + 1, n_polys):
-
-            dx_aux = cp.Variable(nonneg=True)
-
-            dy_aux = cp.Variable(nonneg=True)
-
-            orig_dx = (
-                original_centers[i][0]
-                - original_centers[j][0]
-            )
-
-            orig_dy = (
-                original_centers[i][1]
-                - original_centers[j][1]
-            )
-
-            new_dx = (
-                centers[i][0]
-                - centers[j][0]
-            )
-
-            new_dy = (
-                centers[i][1]
-                - centers[j][1]
-            )
-
-            constraints += [
-
-                dx_aux >= new_dx - orig_dx,
-                dx_aux >= -(new_dx - orig_dx),
-
-                dy_aux >= new_dy - orig_dy,
-                dy_aux >= -(new_dy - orig_dy),
-            ]
-
-            relative_direction_term += (
-                dx_aux + dy_aux
-            )
-
-    # ============================================================
-    # TOPOLOGY PRESERVATION
-    # ============================================================
+    # adjacency penalties
 
     for i, j in neighboring_pairs:
 
-        topology_term += cp.sum_squares(
-            centers[i] - centers[j]
-        )
+        hor = cp.Variable(nonneg=True)
+        ver = cp.Variable(nonneg=True)
 
-    # ============================================================
-    # GLOBAL OBJECTIVE
-    # ============================================================
+        w_ij = (
+            np.sqrt(target_areas[i])
+            + np.sqrt(target_areas[j])
+        ) / 2
 
-    objective = cp.Minimize(
+        constraints += [
+            hor >= cp.abs(x[i] - x[j]) - w_ij,
+            ver >= cp.abs(y[i] - y[j]) - w_ij,
+        ]
 
-        W_shape_def * cp.sum(shape_terms)
+        topology_penalty += hor + ver
 
-        + W_area * cp.sum(area_terms)
-
-        + W_spatial * cp.sum(center_terms)
-
-        + W_rel_dir * relative_direction_term
-
-        + W_topology * topology_term
+    objective_terms.append(
+        lambda_t * topology_penalty
     )
 
-    # ============================================================
-    # SOLVE
-    # ============================================================
+    # ---------------------------------------------------------
+    # Solve
+    # ---------------------------------------------------------
+
+    objective = cp.Minimize(
+        cp.sum(objective_terms)
+    )
 
     prob = cp.Problem(
         objective,
@@ -1779,1367 +1863,37 @@ def PolyAreaRadialLP_all_demers_new(
     )
 
     prob.solve(
-        solver=cp.CLARABEL,
+        solver=cp.OSQP,
         verbose=False
     )
 
-    # ============================================================
-    # EXTRACT RESULTS
-    # ============================================================
+    # ---------------------------------------------------------
+    # Construct polygons
+    # ---------------------------------------------------------
 
     new_polygons = []
 
-    actual_areas = []
-    
-    print(prob.status)
+    for region_expr in new_vertices_expr:
 
-    for poly_expr in new_polygon_exprs:
-
-        pts = poly_expr.value
-
-        new_polygons.append(pts)
-
-        actual_areas.append(
-            polygon_areanp(pts)
+        poly = np.array(
+            [v.value for v in region_expr]
         )
+
+        new_polygons.append(poly)
+
+    # ---------------------------------------------------------
+    # Actual areas
+    # ---------------------------------------------------------
+
+    actual_areas = [
+        polygon_area(poly)
+        for poly in new_polygons
+    ]
 
     return (
         new_polygons,
         actual_areas,
         prob.status,
-        prob.value
+        prob.value,
     )
 
-
-
-
-
-
-
-
-
-# def PolyAreaRadialLP_all_demers_new(
-#     polygons,
-#     target_areas,
-#     fixed_points=None,
-#     shape="original",
-
-#     target_centers=None,
-#     horizontal_pairs=None,
-#     vertical_pairs=None,
-#     neighboring_pairs=None,
-#     shared_vertices_of_neighbors=None,
-
-#     # weights
-#     cartographic_error=1.0,
-#     shape_deformation=0.0,
-#     relative_direction=1.0,
-#     topological_accuracy=1.0,
-#     spatial_deformation=1.0,
-
-#     global_shape=1.0, # Only evaluation
-#     local_shape=1.0, # Only evaluation
-#     complexity=1.0, # Only evaluation
-#     data_ink_ratio=1.0, # Only evaluation
-# ):
-#     """
-#     Global LP/QP implementation inspired by:
-
-#     Multicriteria Optimization for Dynamic Demers Cartograms
-
-#     Implements:
-#     - Eq 2-4   : separation constraints
-#     - Eq 7     : relative direction preservation
-#     - Eq 8-9   : weak separation constraints
-#     - Eq 10-13: absolute value linearization
-
-#     IMPORTANT:
-#     This version solves ONE GLOBAL optimization problem.
-#     """
-
-#     # ------------------------------------------------------------
-#     # preprocess
-#     # ------------------------------------------------------------
-
-#     polygons, target_areas, fixed_points, _, target_centers = preprocess(
-#         polygons,
-#         target_areas,
-#         fixed_points,
-#         cartographic_error,
-#         target_centers
-#     )
-
-#     n_polys = len(polygons)
-
-#     if horizontal_pairs is None:
-#         horizontal_pairs, vertical_pairs = \
-#             disjoint_pairs_horizontal_and_vertical(polygons)
-
-#     if neighboring_pairs is None:
-#         neighboring_pairs = neighbouring_pairs(polygons)
-
-#     # ------------------------------------------------------------
-#     # normalize weights
-#     # ------------------------------------------------------------
-
-#     weights = np.array([
-#         shape_deformation,
-#         relative_direction,
-#         topological_accuracy,
-#         spatial_deformation,
-#         cartographic_error
-#     ], dtype=float)
-
-#     weights = weights / (weights.sum() + 1e-12)
-
-#     (
-#         W_shape,
-#         W_rel_dir,
-#         W_topology,
-#         W_spatial,
-#         W_area
-#     ) = weights
-
-#     # ------------------------------------------------------------
-#     # global containers
-#     # ------------------------------------------------------------
-
-#     constraints = []
-
-#     centers = []
-#     half_sizes = []
-
-#     all_new_pts = []
-
-#     shape_terms = []
-#     area_terms = []
-#     spatial_terms = []
-
-#     relative_direction_term = 0
-#     topology_term = 0
-
-#     # ------------------------------------------------------------
-#     # original centers
-#     # ------------------------------------------------------------
-
-#     original_centers = [
-#         np.mean(np.array(poly), axis=0)
-#         for poly in polygons
-#     ]
-
-#     # ------------------------------------------------------------
-#     # build variables for every polygon
-#     # ------------------------------------------------------------
-
-#     for idx in range(n_polys):
-
-#         polygon = np.array(polygons[idx])
-
-#         target_area = target_areas[idx]
-
-#         fixed_point = np.array(fixed_points[idx])
-
-#         target_center = np.array(target_centers[idx])
-
-#         # --------------------------------------------------------
-#         # optional shape conversion
-#         # --------------------------------------------------------
-
-#         if shape == "circle":
-#             polygon = make_circle(
-#                 np.mean(polygon, axis=0),
-#                 target_area,
-#                 n=100
-#             )
-
-#         elif shape == "square":
-#             polygon = make_square(
-#                 np.mean(polygon, axis=0),
-#                 target_area,
-#                 n=100
-#             )
-
-#         # --------------------------------------------------------
-#         # center variables
-#         # --------------------------------------------------------
-
-#         center_shift = cp.Variable(2)
-
-#         moving_center = fixed_point + center_shift
-
-#         centers.append(moving_center)
-
-#         # --------------------------------------------------------
-#         # square size
-#         # --------------------------------------------------------
-
-#         side_length = np.sqrt(target_area)
-
-#         half_size = side_length / 2.0
-
-#         half_sizes.append(half_size)
-
-#         # --------------------------------------------------------
-#         # radial deformation variables
-#         # --------------------------------------------------------
-
-#         n = len(polygon)
-
-#         t = cp.Variable(n)
-
-#         z = cp.Variable(n, nonneg=True)
-
-#         directions = polygon - fixed_point
-
-#         new_pts = moving_center + cp.multiply(
-#             t[:, None],
-#             directions
-#         )
-
-#         all_new_pts.append(new_pts)
-
-#         # --------------------------------------------------------
-#         # target scaling
-#         # --------------------------------------------------------
-
-#         A0 = polygon_areanp(polygon)
-
-#         if A0 <= 1e-12:
-#             continue
-
-#         s = np.sqrt(target_area / A0)
-
-#         min_scale = (
-#             0.01 +
-#             0.24 * shape_deformation
-#         )
-
-#         constraints += [
-#             cp.mean(t) == s,
-#             t >= min_scale,
-
-#             t - 1 <= z,
-#             -(t - 1) <= z
-#         ]
-
-#         # --------------------------------------------------------
-#         # shape deformation
-#         # --------------------------------------------------------
-
-#         l1_term = cp.sum(z)
-
-#         l2_term = cp.sum_squares(t - 1)
-
-#         shape_term = (
-#             (1 - shape_deformation) * l1_term +
-#             shape_deformation * l2_term
-#         )
-
-#         shape_terms.append(shape_term)
-
-#         # --------------------------------------------------------
-#         # area error
-#         # --------------------------------------------------------
-
-#         area_error = cp.square(cp.mean(t) - s)
-
-#         area_terms.append(area_error)
-
-#         # --------------------------------------------------------
-#         # spatial deformation
-#         # --------------------------------------------------------
-
-#         center_term = cp.sum_squares(
-#             moving_center - target_center
-#         )
-
-#         spatial_terms.append(center_term)
-
-#     # ============================================================
-#     # Eq. 2-4 / Eq. 8-9
-#     # separation constraints
-#     # ============================================================
-
-#     # weak horizontal ordering
-#     for (i, j) in horizontal_pairs:
-
-#         constraints += [
-#             centers[i][0] <= centers[j][0]
-#         ]
-
-#     # weak vertical ordering
-#     for (i, j) in vertical_pairs:
-
-#         constraints += [
-#             centers[i][1] <= centers[j][1]
-#         ]
-
-#     # ============================================================
-#     # Eq. 7 + Eq. 10-13
-#     # relative direction preservation
-#     # ============================================================
-
-#     for i in range(n_polys):
-
-#         for j in range(i + 1, n_polys):
-
-#             dx_aux = cp.Variable(nonneg=True)
-
-#             dy_aux = cp.Variable(nonneg=True)
-
-#             original_dx = (
-#                 original_centers[i][0]
-#                 - original_centers[j][0]
-#             )
-
-#             original_dy = (
-#                 original_centers[i][1]
-#                 - original_centers[j][1]
-#             )
-
-#             current_dx = (
-#                 centers[i][0]
-#                 - centers[j][0]
-#             )
-
-#             current_dy = (
-#                 centers[i][1]
-#                 - centers[j][1]
-#             )
-
-#             # absolute value linearization
-
-#             constraints += [
-
-#                 dx_aux >= current_dx - original_dx,
-#                 dx_aux >= -(current_dx - original_dx),
-
-#                 dy_aux >= current_dy - original_dy,
-#                 dy_aux >= -(current_dy - original_dy),
-#             ]
-
-#             relative_direction_term += (
-#                 dx_aux + dy_aux
-#             )
-
-#     # ============================================================
-#     # topology preservation
-#     # ============================================================
-
-#     for (i, j) in neighboring_pairs:
-
-#         topology_term += cp.norm1(
-#             centers[i] - centers[j]
-#         )
-
-#     # ============================================================
-#     # total objective
-#     # ============================================================
-
-#     objective = cp.Minimize(
-
-#         W_shape * cp.sum(shape_terms)
-
-#         + W_area * cp.sum(area_terms)
-
-#         + W_spatial * cp.sum(spatial_terms)
-
-#         + W_rel_dir * relative_direction_term
-
-#         + W_topology * topology_term
-#     )
-
-#     # ============================================================
-#     # solve
-#     # ============================================================
-
-#     problem = cp.Problem(
-#         objective,
-#         constraints
-#     )
-
-#     problem.solve(
-#         solver=cp.CLARABEL
-#     )
-
-#     # ============================================================
-#     # extract results
-#     # ============================================================
-
-#     new_polygons = []
-
-#     actual_areas = []
-
-#     for pts_expr in all_new_pts:
-
-#         pts = pts_expr.value
-
-#         new_polygons.append(pts)
-
-#         actual_areas.append(
-#             polygon_areanp(pts)
-#         )
-
-#     return (
-#         new_polygons,
-#         actual_areas,
-#         problem.status,
-#         problem.value
-#     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-# def PolyAreaRadialLP_all_demers_non_overlap(
-#     polygons,
-#     target_areas,
-#     fixed_points=None,
-#     shape="original",
-#     target_centers=None,
-#     # quality criteria weights (0 = ignore, 1 = full importance)
-#     cartographic_error=1.0,
-#     shape_deformation=0.0,
-#     relative_direction=1.0,
-#     topological_accuracy=1.0,
-#     spatial_deformation=1.0,
-#     global_shape=1.0,
-#     local_shape=1.0,
-#     complexity=1.0,
-#     data_ink_ratio=1.0,
-# ):
-#     """
-#     Radial scaling & translation of polygons with non‑overlap enforcement.
-
-#     For each polygon we:
-#       - keep its star‑shape from a fixed radial center,
-#       - allow scaling per radial direction (t_i) and a global center shift,
-#       - match target area and target center,
-#       - preserve shape (deformation vs. circle/square),
-#       - and when topological_accuracy > 0, add a penalty that pushes
-#         polygons apart so that they stop overlapping.
-
-#     Parameters
-#     ----------
-#     polygons : list of (N,2) arrays
-#     target_areas : list of floats
-#     fixed_points : list of (2,) points, radial origins
-#     shape : 'original', 'circle', 'square'
-#     target_centers : list of (2,) desired centers
-#     ... : weights for different criteria (used as coefficients)
-
-#     Returns
-#     -------
-#     new_polygons : list of (N,2) arrays
-#     actual_areas : list of floats
-#     """
-#     # ------------------------------------------------------------------
-#     # preprocess inputs (assumed to return lists of equal length)
-#     # ------------------------------------------------------------------
-#     polygons, target_areas, fixed_points, cartographic_error, target_centers = preprocess(
-#         polygons, target_areas, fixed_points, cartographic_error, target_centers
-#     )
-
-#     N = len(polygons)
-#     pi = np.pi
-
-#     # ------------------------------------------------------------------
-#     # CVXPY variables for all polygons
-#     # ------------------------------------------------------------------
-#     center_shifts = [cp.Variable(2) for _ in range(N)]          # translation
-#     t_list = []                                                 # radial scalings
-#     z_list = []                                                 # |t-1| auxiliaries
-#     r_vars = []                                                 # for square shape
-
-#     for i, poly in enumerate(polygons):
-#         n = len(poly)
-#         t_list.append(cp.Variable(n))
-#         z_list.append(cp.Variable(n, nonneg=True))
-#         r_vars.append(cp.Variable(nonneg=True))   # only used when shape=='square'
-
-#     # ------------------------------------------------------------------
-#     # constraints (lower bound on scalings)
-#     # ------------------------------------------------------------------
-#     constraints = []
-#     min_scale = 0.01 + 0.24 * shape_deformation
-#     for t in t_list:
-#         constraints += [t >= min_scale]
-
-#     # absolute value constraints |t-1| <= z
-#     for t, z in zip(t_list, z_list):
-#         constraints += [t - 1 <= z, -(t - 1) <= z]
-
-#     # ------------------------------------------------------------------
-#     # build objective
-#     # ------------------------------------------------------------------
-#     obj_expr = 0
-
-#     for i, (poly, target_area, fixed_pt, target_center, t, z, r_var) in enumerate(
-#         zip(polygons, target_areas, fixed_points, target_centers, t_list, z_list, r_vars)
-#     ):
-        
-#         if shape == "circle" and shape_deformation == 0:
-#             poly = make_circle(np.mean(np.array(poly), axis=0), target_area, n=100)
-#         elif shape == "square" and shape_deformation == 0:
-#             poly = make_square(np.mean(np.array(poly), axis=0), target_area, n=100)
-#         else:
-#             poly = np.array(poly)
-
-#         fixed_pt = np.array(fixed_pt)
-#         target_center = np.array(target_center)
-#         directions = poly - fixed_pt          # radial directions from fixed point
-#         radial_norms = np.linalg.norm(directions, axis=1)
-#         moving_center = fixed_pt + center_shifts[i]
-
-#         # ----- area scaling factor -----
-#         A0 = polygon_areanp(poly)            # original area
-#         if A0 < 1e-12:
-#             continue
-#         s = np.sqrt(target_area / A0)
-
-#         # ----- shape deformation term (blend L1 / L2 of t-1) -----
-#         l1_term = cp.sum(z)
-#         l2_term = cp.sum_squares(t - 1)
-#         shape_def_term = (1 - shape_deformation) * l1_term + shape_deformation * l2_term
-
-#         # ----- target shape term (circle / square / original) -----
-#         shape_term = 0
-#         if shape == "circle":
-#             new_radii = cp.multiply(t, radial_norms)
-#             shape_term = cp.sum_squares(new_radii - cp.mean(new_radii))
-#         elif shape == "square":
-#             M = np.maximum(np.abs(directions[:, 0]), np.abs(directions[:, 1]))
-#             shape_term = cp.sum_squares(cp.multiply(t, M) - r_var)
-
-#         # ----- area error (soft penalty on mean(t) == s) -----
-#         area_error = cp.square(cp.mean(t) - s)
-
-#         # ----- center term -----
-#         center_term = cp.sum_squares(moving_center - target_center)
-
-#         # ----- accumulate objective for this polygon -----
-#         obj_expr += (
-#             shape_deformation * shape_def_term
-#             + (1 - shape_deformation) * shape_term
-#             + cartographic_error * area_error
-#             + spatial_deformation * center_term
-#         )
-
-#     # ------------------------------------------------------------------
-#     # non‑overlap penalty (topological accuracy)
-#     # ------------------------------------------------------------------
-#     if topological_accuracy > 0 and N > 1:
-#         for i in range(N):
-#             for j in range(i + 1, N):
-#                 ci = fixed_points[i] + center_shifts[i]
-#                 cj = fixed_points[j] + center_shifts[j]
-#                 dist = cp.norm(ci - cj, 2)
-
-#                 # minimal distance desired: treat polygons as circles with
-#                 # area = target area
-#                 r_i = np.sqrt(target_areas[i] / pi)
-#                 r_j = np.sqrt(target_areas[j] / pi)
-#                 min_dist = r_i + r_j
-
-#                 # squared hinge penalty: max(0, min_dist - dist)^2
-#                 overlap_penalty = cp.square(cp.pos(min_dist - dist))
-#                 obj_expr += topological_accuracy * overlap_penalty
-
-#     # ------------------------------------------------------------------
-#     # solve
-#     # ------------------------------------------------------------------
-#     objective = cp.Minimize(obj_expr)
-#     prob = cp.Problem(objective, constraints)
-#     prob.solve()
-
-#     # ------------------------------------------------------------------
-#     # extract results
-#     # ------------------------------------------------------------------
-#     new_polygons = []
-#     actual_areas = []
-#     for i, (poly, fixed_pt, t) in enumerate(zip(polygons, fixed_points, t_list)):
-#         fixed_pt = np.array(fixed_pt)
-#         directions = poly - fixed_pt
-#         moving_center = fixed_pt + center_shifts[i].value
-#         new_pts = moving_center + np.multiply(t.value[:, None], directions)
-#         new_polygons.append(new_pts)
-#         actual_areas.append(polygon_areanp(new_pts))
-
-#     return new_polygons, actual_areas
-
-
-
-
-
-
-
-
-
-
-
-# # def PolyAreaRadialLP_all_demers_non_overlap(
-# #     polygons,
-# #     target_areas,
-# #     fixed_points=None,
-# #     shape="original",
-# #     target_centers=None,
-
-# #     # quality criteria
-# #     cartographic_error=1.0,
-# #     shape_deformation=0.0,
-# #     relative_direction=1.0,
-# #     topological_accuracy=1.0,
-# #     spatial_deformation=1.0,
-# #     global_shape=1.0,
-# #     local_shape=1.0,
-# #     complexity=1.0,
-# #     data_ink_ratio=1.0,
-# # ):
-# #     """
-# #     Global convex optimization version with:
-# #     - radial deformation
-# #     - movable centers
-# #     - circle/square regularization
-# #     - soft area preservation
-# #     - soft non-overlap constraints
-
-# #     All criteria are in [0,1].
-# #     """
-
-# #     polygons, target_areas, fixed_points, cartographic_error, target_centers = preprocess(
-# #         polygons,
-# #         target_areas,
-# #         fixed_points,
-# #         cartographic_error,
-# #         target_centers
-# #     )
-
-# #     # ------------------------------------------------------------
-# #     # normalize weights
-# #     # ------------------------------------------------------------
-
-# #     weights = np.array([
-# #         shape_deformation,
-# #         relative_direction,
-# #         topological_accuracy,
-# #         spatial_deformation,
-# #         global_shape,
-# #         local_shape,
-# #         complexity,
-# #         data_ink_ratio,
-# #         cartographic_error
-# #     ], dtype=float)
-
-# #     weights = weights / (np.sum(weights) + 1e-12)
-
-# #     (
-# #         W_shape_def,
-# #         W_rel_dir,
-# #         W_topology,
-# #         W_spatial,
-# #         W_global,
-# #         W_local,
-# #         W_complexity,
-# #         W_dataink,
-# #         W_area
-# #     ) = weights
-
-# #     # ------------------------------------------------------------
-# #     # storage
-# #     # ------------------------------------------------------------
-
-# #     all_new_pts = []
-# #     all_centers = []
-# #     all_original_centers = []
-# #     all_radii = []
-
-# #     constraints = []
-
-# #     total_shape_def = 0
-# #     total_shape_term = 0
-# #     total_area_error = 0
-# #     total_center_error = 0
-# #     total_overlap_error = 0
-# #     total_direction_error = 0
-
-# #     # ============================================================
-# #     # BUILD VARIABLES FOR ALL POLYGONS
-# #     # ============================================================
-
-# #     for polygon, target_area, fixed_point, target_center in zip(
-# #         polygons,
-# #         target_areas,
-# #         fixed_points,
-# #         target_centers
-# #     ):
-
-# #         # --------------------------------------------------------
-# #         # optional shape replacement
-# #         # --------------------------------------------------------
-
-# #         if shape == "circle":
-# #             polygon = make_circle(
-# #                 np.mean(np.array(polygon), axis=0),
-# #                 target_area,
-# #                 n=100
-# #             )
-
-# #         elif shape == "square":
-# #             polygon = make_square(
-# #                 np.mean(np.array(polygon), axis=0),
-# #                 target_area,
-# #                 n=100
-# #             )
-
-# #         else:
-# #             polygon = np.array(polygon)
-
-# #         fixed_point = np.array(fixed_point)
-# #         target_center = np.array(target_center)
-
-# #         n = len(polygon)
-
-# #         # --------------------------------------------------------
-# #         # variables
-# #         # --------------------------------------------------------
-
-# #         t = cp.Variable(n)
-
-# #         z = cp.Variable(n, nonneg=True)
-
-# #         center_shift = cp.Variable(2)
-
-# #         moving_center = fixed_point + center_shift
-
-# #         directions = polygon - fixed_point
-
-# #         new_pts = moving_center + cp.multiply(
-# #             t[:, None],
-# #             directions
-# #         )
-
-# #         # --------------------------------------------------------
-# #         # scaling regularization
-# #         # --------------------------------------------------------
-
-# #         deformation_rigidity = (
-# #             0.5 * shape_deformation +
-# #             0.3 * local_shape +
-# #             0.2 * complexity
-# #         )
-
-# #         min_scale = 0.01 + 0.24 * deformation_rigidity
-
-# #         constraints += [
-# #             t >= min_scale
-# #         ]
-
-# #         # --------------------------------------------------------
-# #         # area preservation
-# #         # --------------------------------------------------------
-
-# #         A0 = polygon_areanp(polygon)
-
-# #         if A0 <= 1e-12:
-# #             continue
-
-# #         s = np.sqrt(target_area / A0)
-
-# #         area_error = cp.square(cp.mean(t) - s)
-
-# #         # --------------------------------------------------------
-# #         # shape deformation term
-# #         # --------------------------------------------------------
-
-# #         constraints += [
-# #             t - 1 <= z,
-# #             -(t - 1) <= z
-# #         ]
-
-# #         l1_term = cp.sum(z)
-
-# #         l2_term = cp.sum_squares(t - 1)
-
-# #         shape_def_term = (
-# #             (1 - shape_deformation) * l1_term +
-# #             shape_deformation * l2_term
-# #         )
-
-# #         # --------------------------------------------------------
-# #         # target shape term
-# #         # --------------------------------------------------------
-
-# #         shape_term = 0
-
-# #         radial_norms = np.linalg.norm(
-# #             directions,
-# #             axis=1
-# #         )
-
-# #         # ------------------ circle ------------------------------
-
-# #         if shape == "circle":
-
-# #             new_radii = cp.multiply(t, radial_norms)
-
-# #             shape_term += cp.sum_squares(
-# #                 new_radii - cp.mean(new_radii)
-# #             )
-
-# #             approx_radius = np.sqrt(target_area / np.pi)
-
-# #         # ------------------ square ------------------------------
-
-# #         elif shape == "square":
-
-# #             M = np.maximum(
-# #                 np.abs(directions[:, 0]),
-# #                 np.abs(directions[:, 1])
-# #             )
-
-# #             r = cp.Variable(nonneg=True)
-
-# #             shape_term += cp.sum_squares(
-# #                 cp.multiply(t, M) - r
-# #             )
-
-# #             approx_radius = np.sqrt(target_area) / 2
-
-# #         else:
-
-# #             approx_radius = np.sqrt(target_area / np.pi)
-
-# #         # --------------------------------------------------------
-# #         # center objective
-# #         # --------------------------------------------------------
-
-# #         center_term = cp.sum_squares(
-# #             moving_center - target_center
-# #         )
-
-# #         # --------------------------------------------------------
-# #         # store everything
-# #         # --------------------------------------------------------
-
-# #         all_new_pts.append(new_pts)
-
-# #         all_centers.append(moving_center)
-
-# #         all_original_centers.append(fixed_point)
-
-# #         all_radii.append(approx_radius)
-
-# #         total_shape_def += shape_def_term
-
-# #         total_shape_term += shape_term
-
-# #         total_area_error += area_error
-
-# #         total_center_error += center_term
-
-# #     # ============================================================
-# #     # PAIRWISE TERMS
-# #     # ============================================================
-
-# #     k = len(all_centers)
-
-# #     for i in range(k):
-
-# #         for j in range(i + 1, k):
-
-# #             center_i = all_centers[i]
-# #             center_j = all_centers[j]
-
-# #             original_i = all_original_centers[i]
-# #             original_j = all_original_centers[j]
-
-# #             Ri = all_radii[i]
-# #             Rj = all_radii[j]
-
-# #             # ----------------------------------------------------
-# #             # ORIGINAL DIRECTION
-# #             # ----------------------------------------------------
-
-# #             dir_ij = original_j - original_i
-
-# #             norm_dir = np.linalg.norm(dir_ij)
-
-# #             if norm_dir <= 1e-12:
-# #                 continue
-
-# #             dir_ij = dir_ij / norm_dir
-
-# #             # ----------------------------------------------------
-# #             # NON-OVERLAP
-# #             # ----------------------------------------------------
-
-# #             slack = cp.Variable(nonneg=True)
-
-# #             required_sep = Ri + Rj
-
-# #             constraints += [
-# #                 dir_ij @ (center_j - center_i)
-# #                 >= required_sep - slack
-# #             ]
-
-# #             total_overlap_error += cp.square(slack)
-
-# #             # ----------------------------------------------------
-# #             # RELATIVE DIRECTION PRESERVATION
-# #             # ----------------------------------------------------
-
-# #             original_vec = original_j - original_i
-
-# #             current_vec = center_j - center_i
-
-# #             total_direction_error += cp.sum_squares(
-# #                 current_vec - original_vec
-# #             )
-
-# #     # ============================================================
-# #     # FINAL OBJECTIVE
-# #     # ============================================================
-
-# #     objective = cp.Minimize(
-
-# #         # shape deformation
-# #         W_shape_def * total_shape_def +
-
-# #         # target shape
-# #         (1 - W_shape_def) * total_shape_term +
-
-# #         # area preservation
-# #         W_area * total_area_error +
-
-# #         # center movement
-# #         W_spatial * total_center_error +
-
-# #         # overlap prevention
-# #         W_topology * total_overlap_error +
-
-# #         # relative direction
-# #         W_rel_dir * total_direction_error
-# #     )
-
-# #     # ============================================================
-# #     # SOLVE
-# #     # ============================================================
-
-# #     prob = cp.Problem(objective, constraints)
-
-# #     prob.solve(verbose=False)
-
-# #     # ============================================================
-# #     # OUTPUT
-# #     # ============================================================
-
-# #     new_polygons = []
-# #     actual_areas = []
-
-# #     for pts in all_new_pts:
-
-# #         pts_val = pts.value
-
-# #         new_polygons.append(pts_val)
-
-# #         actual_areas.append(
-# #             polygon_areanp(pts_val)
-# #         )
-
-# #     return new_polygons, actual_areas
-
-
-
-
-
-
-
-
-
-
-
-# def PolyAreaRadialLP_all_test(
-#     polygons,
-#     target_areas,
-#     fixed_points=None,
-#     shape="original",
-
-#     # legacy
-#     cartographic_error=1.0,
-#     shape_preservation=0.5,
-
-#     # multicriteria weights
-#     shape_deformation=1.0,
-#     relative_direction=1.0,
-#     topological_accuracy=1.0,
-#     spatial_deformation=1.0,
-#     global_shape=1.0,
-#     local_shape=1.0,
-#     complexity=1.0,
-#     data_ink_ratio=1.0,
-
-#     solver=None,
-#     verbose=False
-# ):
-#     """
-#     Multicriteria convex radial polygon deformation LP.
-
-#     Parameters
-#     ----------
-#     polygons : list
-#         Single polygon or list of polygons.
-
-#     target_areas : float or list
-#         Desired target area(s).
-
-#     fixed_points : list or None
-#         Radial centers.
-
-#     shape : str
-#         "original", "circle", or "square"
-
-#     All multicriteria weights are in [0,1].
-
-#     Larger weight => criterion is more important.
-#     """
-
-#     polygons, target_areas, fixed_points, cartographic_error = preprocess(
-#         polygons,
-#         target_areas,
-#         fixed_points,
-#         cartographic_error
-#     )
-
-#     # ------------------------------------------------------------------
-#     # normalize weights
-#     # ------------------------------------------------------------------
-
-#     weights = np.array([
-#         shape_deformation,
-#         relative_direction,
-#         topological_accuracy,
-#         spatial_deformation,
-#         global_shape,
-#         local_shape,
-#         complexity,
-#         data_ink_ratio,
-#         cartographic_error
-#     ], dtype=float)
-
-#     weights = weights / (np.sum(weights) + 1e-12)
-
-#     (
-#         W_shape_def,
-#         W_rel_dir,
-#         W_topology,
-#         W_spatial,
-#         W_global,
-#         W_local,
-#         W_complexity,
-#         W_dataink,
-#         W_area
-#     ) = weights
-
-#     new_polygons = []
-#     actual_areas = []
-
-#     # ==================================================================
-#     # optimize each polygon
-#     # ==================================================================
-
-#     for polygon, target_area, fixed_point in zip(
-#         polygons,
-#         target_areas,
-#         fixed_points
-#     ):
-
-#         polygon = np.array(polygon)
-#         fixed_point = np.array(fixed_point)
-
-#         n = len(polygon)
-
-#         # --------------------------------------------------------------
-#         # variables
-#         # --------------------------------------------------------------
-
-#         t = cp.Variable(n)
-
-#         # L1 auxiliary variables
-#         z = cp.Variable(n, nonneg=True)
-
-#         # radial deformation
-#         directions = polygon - fixed_point
-
-#         new_pts = fixed_point + cp.multiply(
-#             t[:, None],
-#             directions
-#         )
-
-#         constraints = []
-
-#         # --------------------------------------------------------------
-#         # target area scaling
-#         # --------------------------------------------------------------
-
-#         A0 = polygon_areanp(polygon)
-
-#         if A0 <= 1e-12:
-#             continue
-
-#         s = np.sqrt(target_area / A0)
-
-#         constraints += [
-#             cp.mean(t) == s,
-#             t >= 0.05
-#         ]
-
-#         # --------------------------------------------------------------
-#         # |t - 1| <= z
-#         # --------------------------------------------------------------
-
-#         constraints += [
-#             t - 1 <= z,
-#             -(t - 1) <= z
-#         ]
-
-#         # ==============================================================
-#         # 1. SHAPE DEFORMATION
-#         # ==============================================================
-
-#         l1_term = cp.sum(z)
-
-#         l2_term = cp.sum_squares(t - 1)
-
-#         shape_def_term = (
-#             (1 - shape_preservation) * l1_term +
-#             shape_preservation * l2_term
-#         )
-
-#         # ==============================================================
-#         # 2. RELATIVE DIRECTION PRESERVATION
-#         #
-#         # Radial deformation inherently preserves direction.
-#         # We still softly penalize non-uniform angular scaling.
-#         # ==============================================================
-
-#         rel_dir_term = cp.sum_squares(t - cp.mean(t))
-
-#         # ==============================================================
-#         # 3. TOPOLOGICAL ACCURACY
-#         #
-#         # Preserve local edge lengths.
-#         # DCP-safe version.
-#         # ==============================================================
-
-#         topology_terms = []
-
-#         for i in range(n - 1):
-
-#             orig_len = np.linalg.norm(
-#                 polygon[i + 1] - polygon[i]
-#             )
-
-#             new_edge = new_pts[i + 1] - new_pts[i]
-
-#             edge_len = cp.Variable(nonneg=True)
-
-#             # epigraph of norm
-#             constraints += [
-#                 cp.norm(new_edge, 2) <= edge_len
-#             ]
-
-#             topology_terms.append(
-#                 cp.square(edge_len - orig_len)
-#             )
-
-#         topology_term = cp.sum(topology_terms)
-
-#         # ==============================================================
-#         # 4. SPATIAL DEFORMATION
-#         #
-#         # Preserve centroid.
-#         # ==============================================================
-
-#         orig_centroid = np.mean(polygon, axis=0)
-
-#         new_centroid = cp.sum(new_pts, axis=0) / n
-
-#         spatial_term = cp.sum_squares(
-#             new_centroid - orig_centroid
-#         )
-
-#         # ==============================================================
-#         # 5. GLOBAL SHAPE
-#         #
-#         # Encourage coherent scaling.
-#         # ==============================================================
-
-#         # global_shape_term = cp.sum_squares(
-#         #     t - cp.mean(t)
-#         # )
-
-#         mean_t = cp.sum(t) / n
-
-#         global_shape_term = cp.sum_squares(
-#             t - mean_t
-#         )
-
-#         # ==============================================================
-#         # 6. LOCAL SHAPE
-#         #
-#         # Neighboring vertices should deform similarly.
-#         # ==============================================================
-
-#         if n >= 2:
-#             local_shape_term = cp.sum_squares(
-#                 t[1:] - t[:-1]
-#             )
-#         else:
-#             local_shape_term = 0
-
-#         # ==============================================================
-#         # 7. COMPLEXITY
-#         #
-#         # Smooth second derivative.
-#         # ==============================================================
-
-#         if n >= 3:
-#             complexity_term = cp.sum_squares(
-#                 t[2:] - 2 * t[1:-1] + t[:-2]
-#             )
-#         else:
-#             complexity_term = 0
-
-#         # ==============================================================
-#         # 8. DATA INK RATIO
-#         #
-#         # Encourage compact radial distribution.
-#         # ==============================================================
-
-#         radial_norms = np.linalg.norm(
-#             directions,
-#             axis=1
-#         )
-
-#         new_radii = cp.multiply(t, radial_norms)
-
-#         data_ink_term = cp.sum_squares(
-#             new_radii - cp.mean(new_radii)
-#         )
-
-#         # ==============================================================
-#         # 9. CARTOGRAPHIC ERROR
-#         #
-#         # Soft area consistency.
-#         # ==============================================================
-
-#         area_error_term = cp.square(
-#             cp.mean(t) - s
-#         )
-
-#         # ==============================================================
-#         # OPTIONAL SHAPE REGULARIZATION
-#         # ==============================================================
-
-#         shape_term = 0
-
-#         # --------------------------------------------------------------
-#         # circle
-#         # --------------------------------------------------------------
-
-#         if shape == "circle":
-
-#             shape_term += cp.sum_squares(
-#                 new_radii - cp.mean(new_radii)
-#             )
-
-#         # --------------------------------------------------------------
-#         # square
-#         # --------------------------------------------------------------
-
-#         elif shape == "square":
-
-#             centered = new_pts - fixed_point
-
-#             u = cp.Variable(n, nonneg=True)
-#             v = cp.Variable(n, nonneg=True)
-#             d = cp.Variable(n, nonneg=True)
-
-#             constraints += [
-
-#                 u >= centered[:, 0],
-#                 u >= -centered[:, 0],
-
-#                 v >= centered[:, 1],
-#                 v >= -centered[:, 1],
-
-#                 d >= u - v,
-#                 d >= v - u
-#             ]
-
-#             shape_term += cp.sum_squares(d)
-
-#         # ==============================================================
-#         # FINAL MULTICRITERIA OBJECTIVE
-#         # ==============================================================
-
-#         objective = cp.Minimize(
-
-#             W_shape_def * shape_def_term +
-
-#             W_rel_dir * rel_dir_term +
-
-#             W_topology * topology_term +
-
-#             W_spatial * spatial_term +
-
-#             W_global * global_shape_term +
-
-#             W_local * local_shape_term +
-
-#             W_complexity * complexity_term +
-
-#             W_dataink * data_ink_term +
-
-#             W_area * area_error_term +
-
-#             0.25 * shape_term
-#         )
-
-#         # ==============================================================
-#         # solve
-#         # ==============================================================
-
-#         prob = cp.Problem(objective, constraints)
-
-#         try:
-#             prob.solve(
-#                 solver=solver,
-#                 verbose=verbose
-#             )
-
-#         except Exception as e:
-#             print(f"Solver failed: {e}")
-#             continue
-
-#         if new_pts.value is None:
-#             print("Optimization failed.")
-#             continue
-
-#         pts = np.array(new_pts.value)
-
-#         new_polygons.append(pts)
-
-#         actual_areas.append(
-#             polygon_areanp(pts)
-#         )
-
-#     return new_polygons, actual_areas
