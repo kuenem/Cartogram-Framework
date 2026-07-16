@@ -9,9 +9,9 @@ sys.path.append(project_dir)
 
 from src.geometry import *
 
-def plot_polys(polygons, title="Polygons", plot_points=False, centroids=False, label_vertices=False, legend=True, target_centers=None, names=None):
+def plot_polys(polygons, title="Polygons", plot_points=False, centroids=False, label_vertices=False, legend=True, target_centers=None, names=None, svg=False):
     
-    plt.figure()
+    plt.figure(figsize=[12.8, 9.6])
     
     for idx, points in enumerate(polygons):
         points = np.array(points)
@@ -57,6 +57,8 @@ def plot_polys(polygons, title="Polygons", plot_points=False, centroids=False, l
     plt.title(title)
     if legend:
         plt.legend()
+    if svg:
+        plt.savefig(f"{title}.svg", format='svg')
     plt.show()
 
 

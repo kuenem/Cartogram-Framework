@@ -1,2 +1,2 @@
-from .CartogramFramework_1 import *
+from .CartogramFramework import *
 from .preprocessing import *

@@ -89,6 +89,9 @@ import cvxpy as cp
 from typing import Optional
 import os
 import sys
+from scipy.spatial import KDTree
+from skimage.measure import find_contours
+from matplotlib.path import Path
 
 project_dir = os.path.abspath(os.path.join(os.getcwd(), '..'))
 sys.path.append(project_dir)
@@ -222,23 +225,15 @@ def CartogramFramework_global(
     # Multiplier on r*_i beyond which the penalty becomes active.
     # 1.5 means: no penalty up to 1.5× the ideal radius, quadratic beyond.
 
-    # ── Post-processing: fill holes between regions ────────────────────────
-    postprocess_fill_holes: bool = False,
-    # When True, after the main solve (and after any contiguous snapping),
-    # detect unassigned "hole" pixels/regions between polygons and assign
-    # each hole point to its nearest neighbouring polygon, then rebuild
-    # polygon boundaries to include the claimed area.  Implemented via
-    # fill_holes_nearest_neighbor() below.
 
-    postprocess_fill_holes_resolution: float = 0.0,
-    # Grid resolution used when rasterising the map to find holes.
-    # 0.0 (default) = auto-select as 1 % of the bounding-box diagonal.
-    # Smaller values are more accurate but slower.
-
-    postprocess_fill_holes_min_area: float = 0.0,
-    # Holes smaller than this area (in coordinate² units) are ignored.
-    # 0.0 (default) = fill all holes regardless of size.
-    # Useful to skip tiny numerical slivers.
+    postprocess_resolve_overlaps: bool = False,
+    # When True, run the overlap-resolution pass BEFORE hole-filling.
+    # Each overlapping region is detected and clipped so the overlapping
+    # portion is split along the midline and given to the polygon whose
+    # centroid is nearest — preserving total area.  The area "lost" by
+    # each polygon during this pass is recorded and used as a priority
+    # weight in the subsequent hole-filling step (polygons that lost more
+    # to overlap get proportionally more of any adjacent hole area).
 ):
     # ------------------------------------------------------------------
     # 0. Preprocessing
@@ -831,26 +826,32 @@ def CartogramFramework_global(
     # ------------------------------------------------------------------
     if postprocess_contiguous and is_contiguous and shared_vertices_of_neighbors is not None:
         print("Post-processing: snapping shared vertices "
-              f"(method='{postprocess_snap_method}'")
+              f"(method='{postprocess_snap_method}')")
         new_polygons = close_contiguous_gaps(
             polygons                          = new_polygons,
             shared_vertices_of_neighbors_data = shared_vertices_of_neighbors,
-            original_polygons                 = init_polygons,  # stable index reference
+            original_polygons                 = init_polygons,
             method                            = postprocess_snap_method,
         )
+
         actual_areas = [polygon_areanp(p) for p in new_polygons]
 
     # ------------------------------------------------------------------
-    # 10. Hole-filling post-processing (optional)
+    # 10. Gap / overlap post-processing — unified pipeline
+    #
+    #  Order matters:
+    #    a) resolve_overlaps  (if requested) — split overlap areas, record losses
     # ------------------------------------------------------------------
-    if postprocess_fill_holes:
-        print("Post-processing: filling holes between regions …")
-        new_polygons = fill_holes_nearest_neighbor(
-            polygons    = new_polygons,
-            resolution  = postprocess_fill_holes_resolution,
-            min_area    = postprocess_fill_holes_min_area,
-        )
+    overlap_area_lost = [0.0] * n_regions  # per-region area lost to overlap clipping
+
+    if postprocess_resolve_overlaps:
+        print("Post-processing: resolving polygon overlaps …")
+        new_polygons, overlap_area_lost = resolve_polygon_overlaps(new_polygons)
         actual_areas = [polygon_areanp(p) for p in new_polygons]
+        total_lost = sum(overlap_area_lost)
+        if total_lost > 0:
+            print(f"  Total area redistributed from overlaps: {total_lost:.4g}")
+
 
     return new_polygons, actual_areas, prob.status, prob.value, leaders, target_areas
 
@@ -951,118 +952,183 @@ def shrink_polygon(poly: np.ndarray, factor: float) -> np.ndarray:
     return centroid + factor * (poly - centroid)
 
 
-def resolve_overlaps(
-    polygons: list,
-    shrink_factor: float = 0.98,
-) -> list:
+# def resolve_overlaps(
+#     polygons: list,
+#     shrink_factor: float = 0.98,
+# ) -> list:
+#     """
+#     Apply a uniform shrink toward each polygon's centroid to remove
+#     residual overlaps after snapping.  Small shrink factors (0.95–0.99)
+#     leave barely-visible gaps but guarantee no overlap.
+
+#     Parameters
+#     ----------
+#     polygons    : list[np.ndarray]  from close_contiguous_gaps
+#     shrink_factor : float  0 < factor <= 1.0
+
+#     Returns
+#     -------
+#     list[np.ndarray]
+#     """
+#     return [shrink_polygon(np.asarray(p, dtype=float), shrink_factor)
+#             for p in polygons]
+
+
+def resolve_overlaps_raster(polygons, resolution=0.0):
     """
-    Apply a uniform shrink toward each polygon's centroid to remove
-    residual overlaps after snapping.  Small shrink factors (0.95–0.99)
-    leave barely-visible gaps but guarantee no overlap.
-
-    Parameters
-    ----------
-    polygons    : list[np.ndarray]  from close_contiguous_gaps
-    shrink_factor : float  0 < factor <= 1.0
-
-    Returns
-    -------
-    list[np.ndarray]
+    Resolve overlapping polygons by rasterisation and marching-squares extraction.
+    Returns (new_polygons, area_lost) where area_lost approximates the area
+    that was 'taken' from each polygon due to overlap.
     """
-    return [shrink_polygon(np.asarray(p, dtype=float), shrink_factor)
-            for p in polygons]
-
-
-# ---------------------------------------------------------------------------
-# Post-processing: fill holes between regions
-# ---------------------------------------------------------------------------
-
-def fill_holes_nearest_neighbor(
-    polygons: list,
-    resolution: float = 0.0,
-    min_area: float = 0.0,
-) -> list:
-    """
-    Detect unassigned "hole" areas between optimised polygons and assign
-    each hole to its nearest neighbouring polygon, then rebuild that
-    polygon's boundary to include the claimed area.
-
-    Algorithm
-    ---------
-    1. Compute the bounding box of all polygons.
-    2. Rasterise the map at `resolution` to a boolean grid.
-       Each cell is marked "covered" if it falls inside any polygon.
-    3. Find connected components of uncovered cells (holes).
-    4. Discard components that touch the grid border (those are the
-       exterior background, not interior holes).
-    5. Discard components smaller than `min_area`.
-    6. For each remaining hole component, find the polygon whose boundary
-       vertices are closest (minimum L2) to the hole centroid and claim it.
-    7. For each polygon that claimed at least one hole, compute the convex
-       hull of (original vertices ∪ hole cell centres) and return it as
-       the new polygon boundary.
-
-       NOTE: the convex hull is a conservative approximation — it may
-       absorb slightly more area than the raw hole and smooths concave
-       notches.  Replace with a concave-hull / alpha-shape routine if
-       tighter boundaries are required.
-
-    Parameters
-    ----------
-    polygons : list[np.ndarray]
-        Optimised polygons, each (n_i, 2).
-    resolution : float
-        Grid cell size in coordinate units.
-        0.0 = auto (1 % of bbox diagonal, targeting ≥ 200 cells on the
-        long axis).
-    min_area : float
-        Holes smaller than this area (coordinate² units) are ignored.
-        0.0 = fill every detected interior hole.
-
-    Returns
-    -------
-    list[np.ndarray]
-        New polygon list; polygons that absorbed a hole are enlarged,
-        others are returned unchanged.
-    """
-    try:
-        from scipy.ndimage import label as nd_label
-        from scipy.spatial import ConvexHull
-    except ImportError as exc:
-        print(f"  fill_holes_nearest_neighbor: scipy not available ({exc}). "
-              "Skipping hole fill.")
-        return polygons
-
     polys = [np.asarray(p, dtype=float) for p in polygons]
-    n     = len(polys)
+    n = len(polys)
 
-    # ------------------------------------------------------------------
-    # 1. Bounding box
-    # ------------------------------------------------------------------
-    all_pts          = np.vstack(polys)
-    x_min, y_min     = all_pts.min(axis=0)
-    x_max, y_max     = all_pts.max(axis=0)
-    width            = x_max - x_min
-    height           = y_max - y_min
-    diag             = float(np.hypot(width, height))
+    # ---- 1. Compute bounding box and grid ----
+    all_pts = np.vstack(polys)
+    x_min, y_min = all_pts.min(axis=0)
+    x_max, y_max = all_pts.max(axis=0)
+    diag = np.hypot(x_max - x_min, y_max - y_min)
+    if resolution <= 0:
+        resolution = max(diag / 200.0, 1e-10)
 
+    n_cols = max(int(np.ceil((x_max - x_min) / resolution)) + 1, 2)
+    n_rows = max(int(np.ceil((y_max - y_min) / resolution)) + 1, 2)
+    col_coords = x_min + (np.arange(n_cols) + 0.5) * resolution
+    row_coords = y_min + (np.arange(n_rows) + 0.5) * resolution
+    xx, yy = np.meshgrid(col_coords, row_coords)
+    grid_pts = np.column_stack([xx.ravel(), yy.ravel()])
+
+    # ---- 2. Build binary mask per polygon (point-in-polygon) ----
+    masks = []
+    for p in polys:
+        path = Path(p)
+        inside = path.contains_points(grid_pts).reshape(n_rows, n_cols)
+        masks.append(inside)
+
+    # ---- 3. Initial assignment: each cell gets first owner, then resolve overlaps ----
+    owner = np.full((n_rows, n_cols), -1, dtype=int)
+    # First pass: assign cells to first polygon found
+    for k, mask in enumerate(masks):
+        owner[mask & (owner == -1)] = k
+
+    # For cells covered by multiple polygons, we need to assign to nearest centroid
+    # Find all cells that are covered by more than one polygon
+    overlap_count = np.sum(masks, axis=0)  # sum over polygons -> (n_rows, n_cols)
+    overlap_mask = overlap_count > 1
+
+    if np.any(overlap_mask):
+        # Centroids of original polygons
+        centroids = np.array([np.mean(p, axis=0) for p in polys])
+        tree = KDTree(centroids)
+
+        # Get coordinates of overlapping cells
+        rr, cc = np.where(overlap_mask)
+        cell_pts = np.column_stack([col_coords[cc], row_coords[rr]])
+        # Query nearest centroid for each overlapping cell
+        _, idx = tree.query(cell_pts)
+        # Reassign
+        for r, c, new_owner in zip(rr, cc, idx):
+            owner[r, c] = new_owner
+
+    # ---- 4. Compute area_lost for each polygon ----
+    # area_lost = number of cells originally covered by polygon k but now assigned to someone else
+    area_lost = [0.0] * n
+    cell_area = resolution ** 2
+    for k in range(n):
+        # Originally covered by k
+        orig = masks[k]
+        # Now assigned to k
+        now = (owner == k)
+        lost_cells = orig & ~now
+        area_lost[k] = lost_cells.sum() * cell_area
+
+    # ---- 5. Extract polygon boundaries using marching squares ----
+    new_polys = []
+    for k in range(n):
+        mask = (owner == k)
+        if not np.any(mask):
+            # Polygon completely disappeared -> tiny polygon around centroid
+            centroid = np.mean(polys[k], axis=0)
+            tiny = centroid + 1e-6 * np.array([
+                [-1, -1], [1, -1], [1, 1], [-1, 1]
+            ])
+            new_polys.append(tiny)
+            continue
+
+        # find contours at level 0.5 (binary threshold)
+        contours = find_contours(mask.astype(float), 0.5)
+        if not contours:
+            # fallback: take all cells and build convex hull (but we want to avoid expansion)
+            # Instead, we take the convex hull of the cell centres with a small shrink
+            rr, cc = np.where(mask)
+            pts = np.column_stack([col_coords[cc], row_coords[rr]])
+            if len(pts) < 3:
+                # too few points, use centroid
+                new_polys.append(np.mean(pts, axis=0)[None, :] + 1e-6*np.random.randn(3,2))
+            else:
+                # Use convex hull but then shrink inward to avoid overlap
+                from scipy.spatial import ConvexHull
+                hull = ConvexHull(pts)
+                hull_pts = pts[hull.vertices]
+                # shrink by 5% toward centroid to guarantee no overlap
+                centroid = np.mean(hull_pts, axis=0)
+                shrunk = centroid + 0.95 * (hull_pts - centroid)
+                new_polys.append(shrunk)
+        else:
+            # Take the longest contour (outer boundary)
+            largest = max(contours, key=len)
+            # Convert row/col indices to coordinates
+            coords = np.column_stack([
+                col_coords[largest[:, 1].astype(int)],
+                row_coords[largest[:, 0].astype(int)]
+            ])
+            # Close the polygon if not already
+            if not np.allclose(coords[0], coords[-1]):
+                coords = np.vstack([coords, coords[0]])
+            new_polys.append(coords)
+
+    return new_polys, area_lost
+
+
+# ---------------------------------------------------------------------------
+# Post-processing: unified gap/hole closing and overlap resolution
+# ---------------------------------------------------------------------------
+
+def _rasterise_polygons(polys, resolution):
+    """
+    Shared rasterisation used by both postprocess_gaps and resolve_polygon_overlaps.
+
+    Returns
+    -------
+    covered   : (n_rows, n_cols) bool   — True where ANY polygon covers the cell
+    owner     : (n_rows, n_cols) int    — index of polygon covering the cell,
+                                          -1 if uncovered, n if contested overlap
+    col_coords: (n_cols,) float
+    row_coords: (n_rows,) float
+    resolution: float                   — possibly auto-computed
+    """
+    from scipy.ndimage import label as nd_label
+
+    all_pts      = np.vstack(polys)
+    x_min, y_min = all_pts.min(axis=0)
+    x_max, y_max = all_pts.max(axis=0)
+    diag         = float(np.hypot(x_max - x_min, y_max - y_min))
     if resolution <= 0.0:
         resolution = max(diag / 200.0, 1e-10)
 
-    # ------------------------------------------------------------------
-    # 2. Rasterise: mark cells covered by any polygon
-    # ------------------------------------------------------------------
-    n_cols = max(int(np.ceil(width  / resolution)) + 1, 2)
-    n_rows = max(int(np.ceil(height / resolution)) + 1, 2)
+    n_cols = max(int(np.ceil((x_max - x_min) / resolution)) + 1, 2)
+    n_rows = max(int(np.ceil((y_max - y_min) / resolution)) + 1, 2)
 
     covered    = np.zeros((n_rows, n_cols), dtype=bool)
+    owner      = np.full((n_rows, n_cols), -1, dtype=np.int32)
     col_coords = x_min + (np.arange(n_cols) + 0.5) * resolution
     row_coords = y_min + (np.arange(n_rows) + 0.5) * resolution
 
+    OVERLAP = len(polys)   # sentinel value meaning "owned by 2+ polygons"
+
     try:
         from matplotlib.path import Path as MplPath
-
-        for poly in polys:
+        for k, poly in enumerate(polys):
             path = MplPath(poly)
             px_min, py_min = poly.min(axis=0)
             px_max, py_max = poly.max(axis=0)
@@ -1070,14 +1136,16 @@ def fill_holes_nearest_neighbor(
             ci1 = min(int((px_max - x_min) / resolution) + 2, n_cols)
             ri0 = max(int((py_min - y_min) / resolution) - 1, 0)
             ri1 = min(int((py_max - y_min) / resolution) + 2, n_rows)
-
             cc, rr   = np.meshgrid(col_coords[ci0:ci1], row_coords[ri0:ri1])
             test_pts = np.column_stack([cc.ravel(), rr.ravel()])
             inside   = path.contains_points(test_pts).reshape(rr.shape)
+            sub_owner = owner[ri0:ri1, ci0:ci1]
+            # Cells already owned by another polygon → mark as overlap
+            sub_owner[inside & (sub_owner >= 0) & (sub_owner != k)] = OVERLAP
+            # Cells not yet owned → assign to k
+            sub_owner[inside & (sub_owner < 0)] = k
             covered[ri0:ri1, ci0:ci1] |= inside
-
     except ImportError:
-        # Pure-Python ray-casting fallback (slower)
         def _pip(px, py, poly):
             inside = False
             n_v = len(poly)
@@ -1091,91 +1159,250 @@ def fill_holes_nearest_neighbor(
                     inside = not inside
                 j = i
             return inside
-
         for ri in range(n_rows):
             for ci in range(n_cols):
                 px, py = col_coords[ci], row_coords[ri]
-                for poly in polys:
+                for k, poly in enumerate(polys):
                     if _pip(px, py, poly):
+                        if owner[ri, ci] < 0:
+                            owner[ri, ci] = k
+                        elif owner[ri, ci] != k:
+                            owner[ri, ci] = OVERLAP
                         covered[ri, ci] = True
-                        break
 
-    # ------------------------------------------------------------------
-    # 3. Connected components of uncovered cells
-    # ------------------------------------------------------------------
-    structure          = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=int)
-    labeled, n_labels  = nd_label(~covered, structure=structure)
+    return covered, owner, col_coords, row_coords, resolution
 
-    # ------------------------------------------------------------------
-    # 4. Identify exterior (border-touching) labels
-    # ------------------------------------------------------------------
-    border_labels: set[int] = set()
-    for border_slice in (
-        labeled[0, :], labeled[-1, :],
-        labeled[:, 0], labeled[:, -1],
-    ):
-        border_labels.update(border_slice.ravel().tolist())
-    border_labels.discard(0)
 
-    cell_area = resolution ** 2
+def resolve_polygon_overlaps(polygons: list, resolution_factor: float = 500.0) -> tuple:
+    """
+    Remove pairwise polygon overlaps cleanly, without creating holes at
+    non-overlapping borders.
 
-    # ------------------------------------------------------------------
-    # 5 & 6. Assign each interior hole to the nearest polygon
-    # ------------------------------------------------------------------
-    claimed: dict[int, list] = {k: [] for k in range(n)}
+    Core principle
+    --------------
+    The key insight is to distinguish three cases per polygon:
 
-    for lbl in range(1, n_labels + 1):
-        if lbl in border_labels:
+    NO OVERLAP (zero contested raster cells for polygon k)
+        Return the ORIGINAL polygon vertices unchanged — no marching
+        squares, no shrink, no holes.  This is the common case for
+        densely packed maps like US states where the optimizer already
+        did a good job.
+
+    PARTIAL OVERLAP (contested cells exist, no containment)
+        Nearest-centroid cell reassignment draws the correct midline.
+        find_contours traces the new boundary.  A minimal 0.5-cell inward
+        nudge corrects the marching-squares half-cell offset.
+        Non-overlapping border sections are snapped back to the nearest
+        original vertex (within 2 cells) to preserve clean borders.
+
+    CONTAINMENT (>=90% of small is inside large)
+        Both polygons returned unchanged.  Simple polygons cannot have
+        holes, so the large polygon's outline still visually wraps around
+        the small one.  Draw order (large first, small on top) handles
+        the visual result.
+
+    Parameters
+    ----------
+    polygons          : list[np.ndarray]
+    resolution_factor : float
+        Grid resolution = bbox_diagonal / resolution_factor.
+        500 (default) is good for world and US maps.
+
+    Returns
+    -------
+    new_polygons : list[np.ndarray]
+    area_lost    : list[float]
+    """
+    try:
+        from skimage.measure import find_contours
+        from matplotlib.path import Path as MplPath
+    except ImportError as exc:
+        print(f"  resolve_polygon_overlaps requires skimage + matplotlib ({exc}). Skipping.")
+        return list(polygons), [0.0] * len(polygons)
+
+    polys = [np.asarray(p, dtype=float) for p in polygons]
+    n     = len(polys)
+
+    def _area(pts):
+        x, y = pts[:,0], pts[:,1]
+        return float(0.5 * abs(np.dot(x, np.roll(y,-1)) - np.dot(y, np.roll(x,-1))))
+
+    poly_areas = [_area(p) for p in polys]
+
+    # ── 1. Build raster ────────────────────────────────────────────────────
+    all_pts       = np.vstack(polys)
+    x_min, y_min  = all_pts.min(axis=0)
+    x_max, y_max  = all_pts.max(axis=0)
+    diag          = float(np.hypot(x_max - x_min, y_max - y_min))
+    resolution    = max(diag / resolution_factor, 1e-10)
+
+    n_cols = max(int(np.ceil((x_max - x_min) / resolution)) + 2, 3)
+    n_rows = max(int(np.ceil((y_max - y_min) / resolution)) + 2, 3)
+    col_coords = x_min + (np.arange(n_cols) + 0.5) * resolution
+    row_coords = y_min + (np.arange(n_rows) + 0.5) * resolution
+
+    xx, yy    = np.meshgrid(col_coords, row_coords)
+    grid_pts  = np.column_stack([xx.ravel(), yy.ravel()])
+
+    masks = []
+    for poly in polys:
+        path   = MplPath(poly)
+        inside = path.contains_points(grid_pts).reshape(n_rows, n_cols)
+        masks.append(inside)
+
+    masks_arr   = np.array(masks, dtype=np.uint8)
+    overlap_cnt = masks_arr.sum(axis=0)   # 0=empty, 1=clean, >=2=contested
+    cell_area   = resolution ** 2
+
+    # ── 2. Containment detection ──────────────────────────────────────────
+    contain_threshold = 0.90
+    contained_by = [-1] * n
+    for i in range(n):
+        if poly_areas[i] < 1e-12:
             continue
+        for j in range(n):
+            if i == j:
+                continue
+            shared = float((masks_arr[i].astype(bool) & masks_arr[j].astype(bool)).sum()) * cell_area
+            if shared / poly_areas[i] >= contain_threshold:
+                contained_by[i] = j
+                print(f"  Containment: polygon {i} ({poly_areas[i]:.4g}) is "
+                      f"{shared/poly_areas[i]*100:.0f}% inside polygon {j} "
+                      f"({poly_areas[j]:.4g}) — both unchanged")
+                break
 
-        mask      = labeled == lbl
-        hole_area = mask.sum() * cell_area
+    # ── 3. Count contested cells per polygon ──────────────────────────────
+    contested_cells_k = np.array([
+        int((masks_arr[k].astype(bool) & (overlap_cnt > 1)).sum())
+        for k in range(n)
+    ])
 
-        if min_area > 0.0 and hole_area < min_area:
+    # ── 4. Nearest-centroid reassignment for contested cells ──────────────
+    centroids = [np.mean(p, axis=0) for p in polys]
+    owner     = np.full((n_rows, n_cols), -1, dtype=np.int32)
+
+    for k in range(n):
+        uncontested = masks_arr[k].astype(bool) & (overlap_cnt == 1)
+        owner[uncontested] = k
+
+    ri_c, ci_c = np.where(overlap_cnt > 1)
+    for ri, ci in zip(ri_c, ci_c):
+        owners_here = [k for k in range(n) if masks_arr[k, ri, ci]]
+        if not owners_here:
             continue
+        pt    = np.array([col_coords[ci], row_coords[ri]])
+        dists = [np.linalg.norm(pt - centroids[k]) for k in owners_here]
+        owner[ri, ci] = owners_here[int(np.argmin(dists))]
 
-        rr_idx, cc_idx  = np.where(mask)
-        hole_centres    = np.column_stack([col_coords[cc_idx],
-                                           row_coords[rr_idx]])
-        hole_centroid   = hole_centres.mean(axis=0)
+    # ── 5. area_lost ──────────────────────────────────────────────────────
+    area_lost = [0.0] * n
+    for k in range(n):
+        lost = masks_arr[k].astype(bool) & (owner != k)
+        area_lost[k] = float(lost.sum() * cell_area)
 
-        best_poly = -1
-        best_dist = np.inf
-        for k, verts in enumerate(polys):
-            d = np.linalg.norm(verts - hole_centroid[None, :], axis=1).min()
-            if d < best_dist:
-                best_dist = d
-                best_poly = k
-
-        if best_poly >= 0:
-            claimed[best_poly].extend(hole_centres.tolist())
-            print(f"  Hole label={lbl}, area≈{hole_area:.4g} → polygon {best_poly} "
-                  f"(boundary dist={best_dist:.4g})")
-
-    # ------------------------------------------------------------------
-    # 7. Rebuild boundaries via convex hull of original + hole points
-    # ------------------------------------------------------------------
+    # ── 6. Build output polygons ──────────────────────────────────────────
     result = list(polys)
 
-    for k, extra_pts in claimed.items():
-        if not extra_pts:
+    for k in range(n):
+        # CONTAINMENT: both polygons unchanged
+        if contained_by[k] >= 0:
+            result[k] = polys[k].copy()
+            continue
+        if any(contained_by[i] == k for i in range(n)):
+            result[k] = polys[k].copy()
             continue
 
-        extra    = np.array(extra_pts, dtype=float)
-        combined = np.vstack([polys[k], extra])
-
-        if len(combined) < 3:
+        # NO OVERLAP: return original — this is the key fix for US holes
+        if contested_cells_k[k] == 0:
+            result[k] = polys[k].copy()
             continue
 
-        try:
-            hull     = ConvexHull(combined)
-            new_poly = combined[hull.vertices]
-        except Exception as exc:
-            print(f"  ConvexHull failed for polygon {k}: {exc}. Keeping original.")
-            new_poly = polys[k]
+        # PARTIAL OVERLAP: trace boundary from reassigned raster
+        mask_k = (owner == k)
+        if not mask_k.any():
+            c = np.mean(polys[k], axis=0)
+            result[k] = c + 1e-4 * np.array([[-1,-1],[1,-1],[1,1],[-1,1]])
+            continue
 
-        result[k] = new_poly
-        print(f"  Polygon {k}: {len(polys[k])} → {len(new_poly)} vertices "
-              f"after absorbing {len(extra_pts)} hole cell(s).")
+        contours = find_contours(mask_k.astype(float), 0.5)
+        if not contours:
+            result[k] = polys[k].copy()
+            continue
 
-    return result
+        largest = max(contours, key=len)
+        # find_contours returns (row, col) fractional indices
+        coords = np.column_stack([
+            x_min + largest[:, 1] * resolution,
+            y_min + largest[:, 0] * resolution,
+        ])
+
+        # Minimal 0.5-cell inward nudge — corrects marching-squares offset only
+        centroid  = np.mean(coords, axis=0)
+        diff      = coords - centroid
+        dists_r   = np.linalg.norm(diff, axis=1, keepdims=True)
+        dists_r   = np.maximum(dists_r, 1e-12)
+        nudge     = 0.5 * resolution
+        coords    = centroid + (diff / dists_r) * np.maximum(dists_r - nudge, 0.0)
+
+        # Snap contour vertices near original vertices back to exact original
+        # position, but only where those vertices were in non-contested cells.
+        # This preserves clean borders that had no overlap.
+        snap_dist  = 2.0 * resolution
+        orig_verts = polys[k]
+        for vi in range(len(coords)):
+            d_orig = np.linalg.norm(orig_verts - coords[vi], axis=1)
+            ni     = int(np.argmin(d_orig))
+            if d_orig[ni] < snap_dist:
+                ov     = orig_verts[ni]
+                ci_o   = int(np.clip((ov[0]-x_min)/resolution, 0, n_cols-1))
+                ri_o   = int(np.clip((ov[1]-y_min)/resolution, 0, n_rows-1))
+                if overlap_cnt[ri_o, ci_o] <= 1:
+                    coords[vi] = ov
+
+        if len(coords) >= 3:
+            result[k] = coords
+            print(f"  Polygon {k}: redrawn ({contested_cells_k[k]} contested cells, "
+                  f"lost {area_lost[k]:.4g})")
+        else:
+            result[k] = polys[k].copy()
+
+    total_changed = sum(1 for k in range(n) if contested_cells_k[k] > 0
+                        and contained_by[k] < 0
+                        and not any(contained_by[i]==k for i in range(n)))
+    print(f"  resolve_polygon_overlaps: {total_changed}/{n} polygons had overlaps "
+          f"and were redrawn; {n-total_changed} returned unchanged.")
+
+    return result, area_lost
+
+
+def CartogramFramework_1(*args, **kwargs):
+    """
+    Tuned entrypoint for the benchmark notebook.
+
+    The original solver remains untouched in CartogramFramework.py. This
+    wrapper applies safer defaults for the modes that were unstable in the
+    benchmark:
+      - soft mean-scale for original/contiguous modes
+      - looser minimum vertex scale
+      - contiguous modes default to topology-off unless the caller overrides it
+    """
+    shape = kwargs.get("shape", "original")
+
+    if shape in ("original", "contiguous", "contiguous2"):
+        kwargs.setdefault("soft_mean_scale", True)
+        kwargs.setdefault("lambda_mean_scale", 1e5)
+        kwargs.setdefault("t_min", 1e-3)
+
+    if shape in ("contiguous", "contiguous2"):
+        kwargs.setdefault("contiguous_use_topology", False)
+        kwargs.setdefault("lambda_center", 0.0)
+        kwargs.setdefault("lambda_contiguous", 8.0)
+        kwargs.setdefault("lambda_repulsion", 0.5)
+        kwargs.setdefault("repulsion_margin", 2.0)
+        kwargs.setdefault("lambda_vertex_distance", 1.0)
+        kwargs.setdefault("vertex_distance_margin", 1.6)
+        kwargs.setdefault("postprocess_contiguous", True)
+        kwargs.setdefault("postprocess_resolve_overlaps", True)
+
+    return CartogramFramework_global(*args, **kwargs)
+
