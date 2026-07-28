@@ -174,7 +174,9 @@ def loader(
     if df is None:
         raise FileNotFoundError(f"Could not load statistics file: {data_path}")
 
-    polygons, target_areas, target_positions, names, centroid = get_polygon_data(geojson_path)
+    data = {}
+
+    data, polygons, target_areas, target_positions, names, centroid = get_polygon_data(geojson_path, data)
 
     name_col = _detect_column(df, NAME_COLUMN_CANDIDATES, "name", override=name_column)
     value_col = _detect_column(df, VALUE_COLUMN_CANDIDATES, "value", override=value_column)
@@ -190,9 +192,11 @@ def loader(
     for i, name in enumerate(names):
         if name in lookup:
             target_areas[i] = lookup[name]
+            data[name]["target_area"] = lookup[name]
             continue
         if fuzzy_fallback and _normalize_name(name) in fuzzy_lookup:
             target_areas[i] = fuzzy_lookup[_normalize_name(name)]
+            data[name]["target_area"] = fuzzy_lookup[_normalize_name(name)]
             continue
         counter += 1
         unmatched.append(name)
@@ -203,4 +207,4 @@ def loader(
     if unmatched:
         print(f"Unmatched region names: {unmatched}")
 
-    return polygons, target_areas, target_positions, names, centroid
+    return data, polygons, target_areas, target_positions, names, centroid

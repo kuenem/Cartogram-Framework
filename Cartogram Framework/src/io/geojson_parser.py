@@ -51,7 +51,7 @@ def outer_ring(poly):
     return poly[0]   # exterior ring
 
 
-def get_polygon_data(path_to_file, exclude={'Alaska', 'Hawaii', 'Puerto Rico'}):
+def get_polygon_data(path_to_file, data, exclude={'Alaska', 'Hawaii', 'Puerto Rico'}):
 
     polygons = []
     target_areas = []
@@ -62,6 +62,7 @@ def get_polygon_data(path_to_file, exclude={'Alaska', 'Hawaii', 'Puerto Rico'}):
     points_dict = get_all_points(path_to_file)
 
     for name, geom in points_dict.items():
+        data[name] = {}
 
         geom_type = geom["type"]
         coords = geom["coords"]
@@ -93,12 +94,16 @@ def get_polygon_data(path_to_file, exclude={'Alaska', 'Hawaii', 'Puerto Rico'}):
 
         area = float(polygon_areanp(points))
         target_areas.append(area)
+        data[name]["area"] = area
 
         polygons.append(points)
+        data[name]["polygon"] = points
 
         center = np.mean(points, axis=0)
         target_positions.append(center)
+        data[name]["target_positions"] = center
         centroid.append(center)
+        data[name]["centroid"] = center
 
     if exclude:
         filtered = [(name, pts, trgt_rs) for name, pts, trgt_rs in zip(names, polygons, target_areas) if name not in exclude]
@@ -106,4 +111,4 @@ def get_polygon_data(path_to_file, exclude={'Alaska', 'Hawaii', 'Puerto Rico'}):
         polygons = [p for _, p, _ in filtered]
         target_areas = [trgt_rs for _, _, trgt_rs in filtered]
 
-    return polygons, target_areas, target_positions, names, centroid
+    return data, polygons, target_areas, target_positions, names, centroid
