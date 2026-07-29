@@ -1,0 +1,8 @@
+numpy
+pandas
+cvxpy
+scipy
+scikit-image
+matplotlib
+geojson
+shapely

@@ -735,6 +735,18 @@ def elapsed_seconds(start_time: float, end_time: float) -> float:
     return float(end_time - start_time)
 
 
+def _edges_to_index_pairs(
+    edges: set, region_ids: Sequence[str]
+) -> List[Tuple[int, int]]:
+    """Convert a set of frozenset({name_i, name_j}) to list of (index_i, index_j)."""
+    name_to_idx = {name: idx for idx, name in enumerate(region_ids)}
+    pairs = []
+    for edge in edges:
+        a, b = tuple(edge)
+        pairs.append((name_to_idx[a], name_to_idx[b]))
+    return pairs
+
+
 def evaluate_cartogram_records(
     original_data: Mapping[str, Mapping[str, Any]],
     cartogram_data: Mapping[str, Mapping[str, Any]],
@@ -751,8 +763,14 @@ def evaluate_cartogram_records(
     gap_adjacency_pairs: Optional[Iterable[Tuple[int, int]]] = None,
     gap_width_proxy: Optional[Mapping[Tuple[str, str], float]] = None,
     gap_tol_fraction: float = 0.01,
+    compute_gap_from_original_adjacency: bool = True,
 ) -> Dict[str, Any]:
-    """Dict-native end-to-end report for the loader/cartogram record format."""
+    """Dict-native end-to-end report for the loader/cartogram record format.
+
+    If `compute_gap_from_original_adjacency` is True (default) and `gap_adjacency_pairs`
+    is not provided, the adjacency edges of the original map (as computed by
+    `adjacency_error`) are used to generate the adjacency pairs for the gap metric.
+    """
     region_ids = _ordered_region_ids(original_data, names)
 
     original_polygons = [
@@ -783,11 +801,7 @@ def evaluate_cartogram_records(
     theta_avg, theta_per_pair = angular_orientation_error(original_centroids, cartogram_centroids, region_ids, pairs=angle_pairs)
     rho_avg, rho_per_pair = orthogonal_orientation_error(original_centroids, cartogram_centroids, region_ids, pairs=angle_pairs)
 
-    if gap_adjacency_pairs is None:
-        gap_adjacency_pairs = list(angle_pairs) if angle_pairs is not None else None
-    if gap_width_proxy is None and gap_adjacency_pairs is not None:
-        gap_width_proxy = build_width_proxy(target_areas, gap_adjacency_pairs, region_ids)
-
+    # Compute adjacency – needed for gap error if requested
     adjacency_tau, adjacency_cartogram_edges, adjacency_original_edges = adjacency_error(
         original_polygons,
         cartogram_polygons,
@@ -795,6 +809,15 @@ def evaluate_cartogram_records(
         original_tolerance=adjacency_original_tolerance,
         new_tolerance=adjacency_new_tolerance,
     )
+
+    # Prepare gap error automatically if requested
+    if gap_adjacency_pairs is None and compute_gap_from_original_adjacency:
+        if adjacency_original_edges:
+            gap_adjacency_pairs = _edges_to_index_pairs(adjacency_original_edges, region_ids)
+        else:
+            gap_adjacency_pairs = []
+    if gap_width_proxy is None and gap_adjacency_pairs is not None:
+        gap_width_proxy = build_width_proxy(target_areas, gap_adjacency_pairs, region_ids)
 
     turning_avg, turning_per_region = turning_angle_distortion(original_polygons, cartogram_polygons, region_ids)
     frechet_avg, frechet_per_region = frechet_distance_metric(original_polygons, cartogram_polygons, region_ids)
@@ -841,3 +864,37 @@ def evaluate_cartogram_records(
         "gap_error": gap_report,
         "complexity": complexity_report,
     }
+
+
+# --------------------------------------------------------------------------
+# 6. One‑call convenience for your data format
+# --------------------------------------------------------------------------
+
+def evaluate_cartogram_from_data(
+    data: Mapping[str, Mapping[str, Any]],
+    **kwargs
+) -> Dict[str, Any]:
+    """Evaluate all metrics from a single data dict that contains both original
+    and cartogram fields.
+
+    Expected keys per region:
+        - 'original_polygon' (or fallback 'polygon') for original shape
+        - 'new_polygon' for cartogram shape
+        - 'centroid' for original centroid
+        - 'new_centroid' for cartogram centroid
+        - 'original_area' for original area
+        - 'target_area' for desired area
+
+    Additional keyword arguments are passed through to `evaluate_cartogram_records`.
+    """
+    return evaluate_cartogram_records(
+        original_data=data,
+        cartogram_data=data,
+        original_polygon_key='original_polygon',
+        cartogram_polygon_key='new_polygon',
+        original_centroid_key='centroid',
+        cartogram_centroid_key='new_centroid',
+        target_area_key='target_area',
+        original_area_key='original_area',
+        **kwargs
+    )
