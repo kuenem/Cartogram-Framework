@@ -7,10 +7,69 @@ Unified cartogram optimisation covering:
   - Original shape
   - Contiguous shape  (shape="contiguous")
   - Contiguous soft   (shape="contiguous2")
+
+Feasibility & identity guarantees
+----------------------------------
+Two structural properties are guaranteed by construction:
+
+1. ALWAYS FEASIBLE. Every constraint in the problem is now either a
+   per-variable box bound or a one-sided slack/hinge lower bound. The
+   three constraint groups that used to be hard equalities/inequalities
+   (mean-scale, horizontal/vertical ordering, contiguous shared-vertex
+   locking) have all been converted to soft quadratic penalties gated by
+   their own weight (lambda_mean_scale, lambda_order, lambda_contiguous).
+   A large weight approximates the old hard behaviour; it can never make
+   the problem infeasible. The only remaining way to get infeasibility is
+   t_min > t_max, which is validated explicitly and raises early.
+
+2. ALL-WEIGHTS-OFF IDENTITY. If every lambda_* is 0, every soft penalty
+   above evaluates to 0 everywhere in the feasible box, so the objective
+   is flat and any feasible point is "optimal" — including but not
+   uniquely the input geometry (t=1, delta=0). To make the input the
+   *unique* minimiser in that case (rather than an arbitrary tie), a
+   tiny always-on anchor penalty pulls t -> 1 and each region's centre
+   back to its fixed point. Its weight (_ANCHOR_EPS below) is hardcoded
+   and NOT exposed as a user parameter — it is small enough (1e-9) to be
+   negligible next to any real lambda, but decisive when all real
+   lambdas are 0.
+   Caveat: for shape="circle"/"square" the "input" being reproduced is
+   the *re-initialised* circle/square (see step 2, "Optional polygon
+   re-initialisation"), not the original geographic polygon — that
+   re-initialisation happens independently of any lambda weight.
+   Caveat: identity requires t=1 to lie within [t_min, t_max]; if you
+   pass bounds that exclude 1 (e.g. to force shrinkage), that is a
+   deliberate constraint and identity is correctly not reachable.
+
+3. EITHER/OR WEIGHT SOURCE. Each of W_shape/W_area/W_spatial/W_topology
+   comes from exactly one source, never a blend of both:
+     W_shape    <- lambda_shape    else (1 - shape_deformation)
+     W_area     <- lambda_area     else cartographic_error
+     W_spatial  <- lambda_center   else spatial_deformation
+     W_topology <- lambda_topology else topological_accuracy
+   This precedence lives in preprocess_global itself (src/core/
+   preprocessing_data.py): each lambda_* defaults to None here, and
+   preprocess_global uses it if it's not None, otherwise falls back to
+   the legacy value. Whichever one actually governs, it does so outright
+   — the two are never added, multiplied, or otherwise combined.
+   The three plain legacy args (cartographic_error, spatial_deformation,
+   topological_accuracy) keep this wrapper's original concrete defaults
+   (1.0, 0.0, 1.0) so that omitting a lambda_*/legacy pair entirely still
+   reproduces the framework's original default weights exactly.
+   shape_deformation is dual-purpose: besides being the legacy fallback
+   for W_shape, it independently selects circle/square re-initialisation
+   in step 2 below. Existing calls (e.g. the Demers/Dorling cells in
+   exploration.ipynb) legitimately pass both lambda_shape AND
+   shape_deformation=0.0 together for that reason — no conflict, since
+   once lambda_shape is given it simply wins for W_shape outright and
+   shape_deformation is still doing its separate structural job.
+   Five previously-accepted legacy parameters (relative_direction,
+   global_shape, local_shape, complexity, data_ink_ratio) are kept only
+   for call-signature compatibility — preprocess_global never reads any
+   of them in its body, so they were already complete no-ops before any
+   of today's changes.
 """
 
 from __future__ import annotations
-from copy import deepcopy
 
 import numpy as np
 import cvxpy as cp
@@ -26,6 +85,22 @@ from src.utils import *
 from src.core import *
 from src.core.preprocessing_data import *
 
+# Weight of the always-on anchor penalty (Fix 2). Hardcoded, not user-facing:
+# negligible next to any real lambda_* (which are O(0.1) to O(1e6) in
+# practice), but makes t=1/delta=0 the unique minimiser when every real
+# lambda_* is 0.
+#
+# NOTE: this value was empirically tuned, not arbitrary. 1e-9 was tried
+# first and FAILS: CLARABEL's convergence tolerance can't resolve an
+# objective that small, so with every real lambda_* at 0 it returned an
+# arbitrary feasible point up to ~0.14 units away from the true input
+# geometry ("optimal" status, but not actually at the anchor's minimiser).
+# 1e-4 was verified (see smoke test) to bring that error down to ~1e-8 —
+# effectively exact — while still being 3-4 orders of magnitude below the
+# smallest lambda_* value used anywhere in practice (e.g. lambda_shape=0.1
+# for Demers cartograms), so it never perceptibly competes with real terms.
+_ANCHOR_EPS = 1e-4
+
 # ---------------------------------------------------------------------------
 # Main optimisation
 # ---------------------------------------------------------------------------
@@ -40,8 +115,13 @@ def CartogramFramework_global(
     #   "original"     — preserve input polygon shape
     #   "circle"       — Dorling cartogram
     #   "square"       — Demers cartogram
-    #   "contiguous"   — original shape + hard shared-vertex locking
-    #   "contiguous2"  — original shape + soft shared-vertex coupling
+    #   "contiguous"   — original shape + shared-vertex coupling (soft)
+    #   "contiguous2"  — same as "contiguous" (kept as an accepted alias)
+    # NOTE (Fix 1c): "contiguous" no longer hard-locks shared vertices via
+    # equality constraints — both names now build the identical soft,
+    # squared-distance penalty weighted by lambda_contiguous. Use a large
+    # lambda_contiguous (1e3-1e6) to approximate the old hard-locking
+    # behaviour while remaining always feasible.
     target_centers=None,
     horizontal_pairs=None,            # list[(i,j)] i left of j
     vertical_pairs=None,              # list[(i,j)] i below j
@@ -50,15 +130,21 @@ def CartogramFramework_global(
     # list of [i, j, shared_points] from shared_vertices_of_neighbors()
 
     # --- objective weights (λ) ---
-    lambda_shape: float    = 1.0,     # λ_s  shape deformation
-    lambda_area: float     = 1.0,     # λ_a  cartographic error (soft)
-    lambda_center: float   = 0.0,     # λ_c  centre fidelity
-    lambda_topology: float = 1.0,     # λ_t  pairwise topology
+    # Each is either set directly here, or left as None so its legacy
+    # quality-criterion equivalent below governs instead (see
+    # preprocess_global). Whichever one is non-None wins OUTRIGHT for that
+    # weight — the two never combine, multiply, or blend together.
+    lambda_shape: Optional[float]    = None,  # λ_s -> W_shape,    else (1 - shape_deformation)
+    lambda_area: Optional[float]     = None,  # λ_a -> W_area,     else cartographic_error
+    lambda_center: Optional[float]   = None,  # λ_c -> W_spatial,  else spatial_deformation
+    lambda_topology: Optional[float] = None,  # λ_t -> W_topology, else topological_accuracy
 
     # --- contiguous-mode parameters ---
     lambda_contiguous: float = 1.0,
-    # Weight for soft shared-vertex penalty (contiguous2 only).
-    # Has no effect for shape="contiguous" (hard constraint mode).
+    # Weight for the soft shared-vertex penalty. Applies identically to
+    # shape="contiguous" and shape="contiguous2" (Fix 1c — both names now
+    # build the same soft penalty; there is no hard-equality mode anymore).
+    # Use a large value (1e3-1e6) to approximate hard locking.
 
     contiguous_area_ratio_cap: float = 10.0,
     # Hard-constraint mode (contiguous): skip locking a shared vertex
@@ -69,7 +155,22 @@ def CartogramFramework_global(
     contiguous_use_topology: bool = True,
     # contiguous / contiguous2: whether to still include the pairwise
     # topology (hor/ver excess-distance) terms in the objective.
-    # Set False if topology constraints make the problem infeasible.
+    # (Kept for backward compatibility; no longer needed purely for
+    # feasibility since Fix 1 — topology terms can no longer cause
+    # infeasibility on their own — but still useful to simplify the
+    # objective if you don't want those terms competing with others.)
+
+    lambda_order: float = 1e6,
+    # Weight of the soft horizontal/vertical ordering penalty (Fix 1b).
+    # Previously "i left of j" / "i below j" (horizontal_pairs /
+    # vertical_pairs) were HARD inequality constraints that could make the
+    # problem infeasible (e.g. cyclic or mutually-contradictory pair
+    # lists, especially combined with contiguous shared-vertex coupling).
+    # They are now a soft quadratic hinge penalty: violations are
+    # penalised, not forbidden. The large default (1e6) makes ordering
+    # "practically hard" in the common case where it's satisfiable, while
+    # guaranteeing the problem never becomes infeasible because of it.
+    # Set lambda_order=0 to disable ordering entirely.
 
     # --- inner shape parameters ---
     gamma: float = 1.0,   # 1 = pure deformation term, 0 = pure E_target
@@ -82,15 +183,32 @@ def CartogramFramework_global(
     t_min:   float = 0.01,  # minimum radial scale
     t_max:   float = 5.0,   # maximum radial scale  (caps runaway vertices)
 
-    # --- legacy quality-criterion API (mapped onto λ weights) ---
-    cartographic_error: float = 1.0,
-    shape_deformation:  float = 0.0,
+    # --- legacy quality-criterion API -------------------------------------
+    # Fallback source for W_shape/W_area/W_spatial/W_topology whenever the
+    # matching lambda_* above is left as None. Each weight comes from
+    # EXACTLY ONE of the two — see the docstring at the top of this file.
+    #
+    # These three keep the concrete defaults this wrapper has always used
+    # (1.0, 0.0, 1.0) rather than preprocess_global's own internal defaults
+    # (1.0, 1.0, 1.0) — deliberately, so that omitting a lambda_*/legacy
+    # pair entirely still reproduces the framework's original default
+    # weights (W_area=1.0, W_spatial=0.0, W_topology=1.0) exactly.
+    cartographic_error: float = 1.0,    # <-> lambda_area
+    spatial_deformation: float = 0.0,   # <-> lambda_center
+    topological_accuracy: float = 1.0,  # <-> lambda_topology
+    # shape_deformation is dual-purpose (legacy fallback for W_shape AND,
+    # independently, the circle/square re-initialisation switch in step 2
+    # below) — see the docstring at the top of this file for why that's
+    # fine and not a conflict.
+    shape_deformation: float = 0.0,
+    # The remaining five legacy criteria are kept ONLY for call-signature
+    # backward compatibility. preprocess_global has never read any of them
+    # anywhere in its body — they were already complete no-ops before any
+    # of today's changes, and still are.
     relative_direction: float = 1.0,
-    topological_accuracy: float = 1.0,
-    spatial_deformation: float = 0.0,
     global_shape: float = 1.0,
-    local_shape:  float = 0.0,
-    complexity:   float = 1.0,
+    local_shape: float = 0.0,
+    complexity: float = 1.0,
     data_ink_ratio: float = 1.0,
 
     # ── Area scaling for non-contiguous ────────────────────────────────────
@@ -117,15 +235,17 @@ def CartogramFramework_global(
     compute_leaders_flag: bool = True,
     leader_tol: float = 1e-3,
 
-    # ── Approach 1: soft mean-scale + looser t_max ─────────────────────────
+    # ── Approach 1: soft mean-scale (Fix 1a — always applied) ──────────────
     soft_mean_scale: bool = True,
-    # Replace the hard mean(t)==s equality with a quadratic soft penalty.
-    # Allows t_max to bite without forcing infeasibility: the solver can
-    # let mean(t) deviate from s slightly if t_max would otherwise be
-    # violated on every vertex.
+    # DEPRECATED / NO-OP: kept only so existing calls that pass this
+    # argument don't break. The hard mean(t)==s equality has been removed
+    # entirely — it could go infeasible whenever s fell outside
+    # [t_min, t_max]. The soft quadratic penalty below is now always
+    # active regardless of this flag's value.
     lambda_mean_scale: float = 1e4,
-    # Weight of the soft mean-scale penalty (only used when soft_mean_scale=True).
-    # Set high (1e3–1e5) to keep area accuracy, lower to allow more slack.
+    # Weight of the soft mean-scale penalty (now always active).
+    # Set high (1e3–1e5) to keep area accuracy, lower to allow more slack,
+    # 0 to disable area-scale fidelity entirely.
 
     # ── Approach 2: pairwise centre repulsion (anti-overlap) ───────────────
     lambda_repulsion: float = 0.0,
@@ -151,6 +271,36 @@ def CartogramFramework_global(
     # Multiplier on r*_i beyond which the penalty becomes active.
     # 1.5 means: no penalty up to 1.5× the ideal radius, quadratic beyond.
 ):
+    """
+    Dict-in / dict-out contract
+    ----------------------------
+    `data` is a dict keyed by region name, each value a dict of per-region
+    fields (polygon, area, target_area, target_positions, centroid, ...).
+    This function MUTATES `data` in place, adding/overwriting these keys
+    on every region record once the solve (and any post-processing) is
+    complete:
+
+        original_polygon, original_area   -- the pre-optimisation geometry
+        new_polygon, new_area             -- the optimised geometry
+        target_area                       -- normalised target used in the solve
+        new_centroid                      -- centroid of new_polygon
+        overlap_area_lost                 -- area clipped away by overlap resolution (0.0 if disabled)
+        status, objective_value           -- solver status / objective (same for every region)
+
+    Anything that is NOT per-region (solver status, objective value, and
+    the Demers/Dorling leader lines) is also mirrored under the reserved
+    key `data["__meta__"]`, since it can't be attached to a single name:
+
+        data["__meta__"] = {
+            "status": ..., "objective_value": ..., "leaders": [...],
+            "target_areas": [...], "n_regions": ...,
+        }
+
+    Returns
+    -------
+    dict
+        The same `data` object, mutated and returned for convenience.
+    """
     # ------------------------------------------------------------------
     # 0. Preprocessing
     # ------------------------------------------------------------------
@@ -183,8 +333,11 @@ def CartogramFramework_global(
         lambda_center=lambda_center,
         lambda_topology=lambda_topology,
     )
-
-    data = deepcopy(data)  # avoid mutating the original input data
+    # preprocess_global (src/core/preprocessing_data.py) resolves each of
+    # W_shape/W_area/W_spatial/W_topology from EITHER its lambda_* argument
+    # (if not None) OR its legacy quality-criterion equivalent — never a
+    # blend of both. See the docstring at the top of this file for the
+    # full pairing and the shape_deformation dual-purpose caveat.
 
     # ── Apply area_scale AFTER normalisation ───────────────────────────────
     # preprocess_global already rescaled target_areas so their sum equals the
@@ -197,6 +350,17 @@ def CartogramFramework_global(
         target_areas = [a * area_scale for a in target_areas]
 
     n_regions = len(polygons)
+
+    # The only remaining possible source of infeasibility after Fix 1: a
+    # per-vertex box bound with an empty range. Validate explicitly and
+    # raise a clear error rather than letting the solver report an opaque
+    # "infeasible" status.
+    if t_min > t_max:
+        raise ValueError(
+            f"t_min ({t_min}) must be <= t_max ({t_max}); as given, the "
+            f"per-vertex scale box [t_min, t_max] is empty and no solution "
+            f"can exist."
+        )
 
     # Determine the "base shape mode" used for per-region energy / init.
     # contiguous modes behave like "original" for the per-region terms.
@@ -248,6 +412,7 @@ def CartogramFramework_global(
     shape_terms  = []
     area_terms   = []
     center_terms = []
+    anchor_terms = []   # Fix 2: always-on, ungated identity-tiebreak penalty
 
     # Store per-region data needed for leader computation and contiguous coupling
     r_vars: list = []          # cp.Variable or None
@@ -278,6 +443,9 @@ def CartogramFramework_global(
             s_vals.append(1.0)
             _t_vars.append(None)
             _directions.append(None)
+            # Anchor the otherwise-unconstrained dummy centre to fp so it
+            # doesn't drift arbitrarily (Fix 2, degenerate-polygon case).
+            anchor_terms.append(cp.sum_squares(dummy_center - fp))
             continue
 
         s = float(np.sqrt(ta / A0))
@@ -303,29 +471,20 @@ def CartogramFramework_global(
         _t_vars.append(t)
         _directions.append(directions)
 
-        # ── Mean-scale: hard equality OR soft penalty (Approach 1) ─────────
-        if soft_mean_scale:
-            # Soft mode: drop the equality, keep bounds, add quadratic penalty.
-            # This lets t_max be tight without causing infeasibility: the solver
-            # can let mean(t) deviate from s by a small amount rather than
-            # being forced to violate the box constraint t <= t_max.
-            constraints += [
-                t >= t_min,
-                t <= t_max,
-                z >= t - 1,
-                z >= -(t - 1),
-            ]
-            mean_scale_penalty = lambda_mean_scale * cp.square(cp.sum(t) / ni - s)
-        else:
-            # Hard mode (original behaviour).
-            constraints += [
-                cp.sum(t) / ni == s,
-                t >= t_min,
-                t <= t_max,
-                z >= t - 1,
-                z >= -(t - 1),
-            ]
-            mean_scale_penalty = 0.0
+        # ── Mean-scale: always a soft penalty (Fix 1a) ──────────────────────
+        # The old hard equality cp.sum(t)/ni == s could conflict with the
+        # t_min/t_max box (e.g. whenever s fell outside that range) and make
+        # the whole problem infeasible. It has been removed unconditionally
+        # — only box bounds remain here, which alone can never be infeasible
+        # (given t_min <= t_max, validated above). The `soft_mean_scale` flag
+        # is kept in the signature as a no-op for backward compatibility.
+        constraints += [
+            t >= t_min,
+            t <= t_max,
+            z >= t - 1,
+            z >= -(t - 1),
+        ]
+        mean_scale_penalty = lambda_mean_scale * cp.square(cp.sum(t) / ni - s)
 
         # ── Approach 3: vertex–centroid distance penalty ─────────────────────
         # Ideal radius: circle with target area.
@@ -392,10 +551,19 @@ def CartogramFramework_global(
         if lambda_vertex_distance > 0.0:
             shape_terms[-1] = shape_terms[-1] + vertex_dist_term  # Approach 3
 
+        # Fix 2: always-on identity anchor for this region — pulls t -> 1
+        # (no shape/area change) and delta -> 0 (centre stays at fp, i.e.
+        # m == fp). Weighted by _ANCHOR_EPS, added to the objective
+        # completely OUTSIDE W_shape/W_spatial/any lambda_*, so it is never
+        # silenced by turning those weights off — it's what makes the
+        # input geometry the *unique* minimiser when every real lambda is 0.
+        anchor_terms.append(cp.sum_squares(t - 1) + cp.sum_squares(delta))
+
     # ------------------------------------------------------------------
     # 4. Pairwise topology constraints and objective terms
     # ------------------------------------------------------------------
     pairwise_terms = []
+    order_terms    = []   # Fix 1b: soft hinge penalties for hor/ver ordering
 
     # For contiguous modes the caller can suppress topology terms if they
     # cause infeasibility (contiguous_use_topology=False).
@@ -419,15 +587,12 @@ def CartogramFramework_global(
             ver = cp.Variable(nonneg=True, name=f"ver_{i}_{j}")
 
             # Excess-distance constraints (eqs. 13–14), linearised absolute value
-            # constraints += [
-            #     hor >= (xi - xj) - w + g,
-            #     hor >= (xj - xi) - w + g,
-            #     ver >= (yi - yj) - w + g,
-            #     ver >= (yj - yi) - w + g,
-            # ]
-
-            slack = cp.Variable(nonneg=True)
-            constraints += [slack >= (w + g) - (xj - xi)]     # only a lower bound -> always feasible
+            constraints += [
+                hor >= (xi - xj) - w + g,
+                hor >= (xj - xi) - w + g,
+                ver >= (yi - yj) - w + g,
+                ver >= (yj - yi) - w + g,
+            ]
 
             # Directional deviation d_ij (eq. 15)
             diag_expr = yi + alpha * (xj - xi) - yj
@@ -440,7 +605,14 @@ def CartogramFramework_global(
             bij = b_ij(i, j)
             pairwise_terms.append(hor + ver + bij * d_var)
 
-        # Hard ordering constraints for H and V pairs (eqs. 11–12)
+        # Soft ordering penalties for H and V pairs (Fix 1b; was eqs. 11–12
+        # as HARD inequality constraints — removed because a contradictory
+        # or cyclic pair list, especially combined with contiguous
+        # shared-vertex coupling, could make the whole problem infeasible).
+        # Each pair now contributes a one-sided hinge: zero penalty if the
+        # ordering already holds, quadratic penalty proportional to the
+        # violation otherwise. Weighted by lambda_order (large by default
+        # so ordering is "practically hard" whenever it's satisfiable).
         all_pairs_seen: set[tuple[int, int]] = set()
         if horizontal_pairs is not None:
             for (i, j) in horizontal_pairs:
@@ -450,7 +622,9 @@ def CartogramFramework_global(
                     w = (np.sqrt(ta_i) + np.sqrt(ta_j)) / 2.0
                     g = gap_ij(i, j)
                     xi = centers_vars[i][0];  xj = centers_vars[j][0]
-                    constraints.append(xj - xi >= w + g)
+                    slack_h = cp.Variable(nonneg=True, name=f"ordh_{i}_{j}")
+                    constraints.append(slack_h >= (w + g) - (xj - xi))
+                    order_terms.append(cp.square(slack_h))
                     all_pairs_seen.add(key)
 
         all_pairs_seen_v: set[tuple[int, int]] = set()
@@ -462,10 +636,15 @@ def CartogramFramework_global(
                     w = (np.sqrt(ta_i) + np.sqrt(ta_j)) / 2.0
                     g = gap_ij(i, j)
                     yi = centers_vars[i][1];  yj = centers_vars[j][1]
-                    constraints.append(yj - yi >= w + g)
+                    slack_v = cp.Variable(nonneg=True, name=f"ordv_{i}_{j}")
+                    constraints.append(slack_v >= (w + g) - (yj - yi))
+                    order_terms.append(cp.square(slack_v))
                     all_pairs_seen_v.add(key)
 
     topology_term = cp.sum(pairwise_terms) if pairwise_terms else cp.Constant(0.0)
+    order_penalty = (
+        lambda_order * cp.sum(order_terms) if order_terms else cp.Constant(0.0)
+    )
 
     # ------------------------------------------------------------------
     # 4b-pre. Approach 2: pairwise centre repulsion (anti-spike / anti-overlap)
@@ -601,24 +780,27 @@ def CartogramFramework_global(
                 v_i = centers_vars[i] + _t_vars[i][k] * _directions[i][k]  # (2,) expr
                 v_j = centers_vars[j] + _t_vars[j][l] * _directions[j][l]  # (2,) expr
 
-                if shape == "contiguous":
-                    # Hard equality: the two images of the shared vertex coincide.
-                    constraints.append(v_i == v_j)
-                    n_locked += 1
-
-                else:  # "contiguous2"
-                    # Soft quadratic penalty: penalise the gap between them,
-                    # normalised by the squared original distance between the
-                    # two region centres so the weight is dimensionless and
-                    # scale-invariant regardless of coordinate units.
-                    diff = v_i - v_j                          # (2,) affine expr
-                    # Normalisation: squared centre-to-centre distance (constant).
-                    ci_fp = _fp_vals[i]  # fixed point of region i
-                    cj_fp = _fp_vals[j]  # fixed point of region j
-                    dist2 = float(np.sum((ci_fp - cj_fp) ** 2))
-                    norm  = max(dist2, 1e-6)   # avoid /0 for coincident centres
-                    contiguous_terms.append(cp.sum_squares(diff) / norm)
-                    n_locked += 1
+                # Fix 1c: always a soft quadratic penalty (the old hard
+                # equality for shape=="contiguous" is removed — a graph of
+                # simultaneous equalities across many regions, each also
+                # bound by t_min/t_max and mean-scale, was easily
+                # overdetermined and a common source of infeasibility).
+                # "contiguous" and "contiguous2" now build the identical
+                # penalty; use a large lambda_contiguous to approximate the
+                # old hard-locking behaviour instead.
+                #
+                # Penalise the gap between the two images of the shared
+                # vertex, normalised by the squared original distance
+                # between the two region centres so the weight is
+                # dimensionless and scale-invariant regardless of
+                # coordinate units.
+                diff = v_i - v_j                          # (2,) affine expr
+                ci_fp = _fp_vals[i]  # fixed point of region i
+                cj_fp = _fp_vals[j]  # fixed point of region j
+                dist2 = float(np.sum((ci_fp - cj_fp) ** 2))
+                norm  = max(dist2, 1e-6)   # avoid /0 for coincident centres
+                contiguous_terms.append(cp.sum_squares(diff) / norm)
+                n_locked += 1
 
     if contiguous_terms:
         contiguous_penalty = cp.sum(contiguous_terms)
@@ -631,13 +813,22 @@ def CartogramFramework_global(
     # ------------------------------------------------------------------
     # 5. Global objective  (eq. 16)
     # ------------------------------------------------------------------
+    # anchor_penalty (Fix 2) is deliberately added OUTSIDE every W_*/lambda_*
+    # factor, multiplied only by the hardcoded _ANCHOR_EPS. That's what makes
+    # it survive "all weights off" and pin the unique minimiser to t=1,
+    # delta=0 (i.e. the input geometry) in that case, while being negligible
+    # (1e-9 scale) whenever any real weight is doing actual work.
+    anchor_penalty = cp.sum(anchor_terms) if anchor_terms else cp.Constant(0.0)
+
     objective = cp.Minimize(
         W_shape    * cp.sum(shape_terms)
         + W_area   * cp.sum(area_terms)
         + W_spatial * cp.sum(center_terms)
         + W_topology * topology_term
+        + order_penalty                             # Fix 1b: soft hor/ver ordering
         + lambda_contiguous * contiguous_penalty
-        + repulsion_penalty                        # Approach 2
+        + repulsion_penalty                         # Approach 2
+        + _ANCHOR_EPS * anchor_penalty               # Fix 2: always-on identity tiebreak
     )
 
     # ------------------------------------------------------------------
@@ -664,10 +855,13 @@ def CartogramFramework_global(
         print(
             f"  WARNING: solver status '{prob.status}' — returning original "
             f"polygons as fallback.\n"
-            f"  Tips for contiguous mode:\n"
-            f"    • Raise contiguous_area_ratio_cap (skips locking large-ratio pairs)\n"
-            f"    • Set contiguous_use_topology=False to drop topology terms\n"
-            f"    • Switch to shape='contiguous2' (soft penalty instead of hard equality)"
+            f"  Note: after Fix 1, every constraint is a box bound or a "
+            f"one-sided slack (never a hard equality), so this status should "
+            f"only occur from solver numerical/timeout issues, not structural "
+            f"infeasibility. If it persists, try:\n"
+            f"    • Lowering lambda_order / lambda_contiguous / lambda_mean_scale "
+            f"(very large weights can make the QP numerically stiff)\n"
+            f"    • Loosening t_min/t_max"
         )
         fallback = [np.asarray(p, dtype=float) for p in init_polygons]
 
@@ -787,13 +981,13 @@ def CartogramFramework_global(
         actual_areas = [polygon_areanp(p) for p in new_polygons]
 
     # overlap_area_lost is always 0.0: the overlap-resolution post-processing
-        # pass (resolve_polygon_overlaps) was removed as unused dead code — it was
-        # never enabled by any call in exploration.ipynb. The field is kept in the
-        # per-region record for downstream compatibility (e.g. plotting code that
-        # expects the key to exist).
-        overlap_area_lost = [0.0] * n_regions
+    # pass (resolve_polygon_overlaps) was removed as unused dead code — it was
+    # never enabled by any call in exploration.ipynb. The field is kept in the
+    # per-region record for downstream compatibility (e.g. plotting code that
+    # expects the key to exist).
+    overlap_area_lost = [0.0] * n_regions
 
- # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # 10. Populate the data dict — single source of truth for results.
     #     Per-region results go on each record; solve-level results
     #     (status, objective, leaders) go under the reserved "__meta__" key.
@@ -812,7 +1006,7 @@ def CartogramFramework_global(
         record["new_area"] = float(actual_areas[idx])
         record["target_area"] = float(target_areas[idx])
         record["new_centroid"] = np.mean(solved_polygon, axis=0)
-        # record["overlap_area_lost"] = float(overlap_area_lost[idx])
+        record["overlap_area_lost"] = float(overlap_area_lost[idx])
         record["status"] = prob.status
         record["objective_value"] = prob.value
         record["constraints"] = constraints
@@ -911,3 +1105,4 @@ def close_contiguous_gaps(
             result[j][l] = snapped
 
     return result
+

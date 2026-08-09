@@ -1,0 +1,22 @@
+{
+  "world": {
+    "region": "contiguous/world",
+    "level": "original_world",
+    "year": 2016
+  },
+  "india": {
+    "region": "india",
+    "level": "states",
+    "year": "2015-16"
+  },
+  "usa": {
+    "region": "usa",
+    "level": "states",
+    "year": 2016
+  },
+  "taiwan": {
+    "region": "taiwan",
+    "level": "states",
+    "year": 2016
+  }
+}

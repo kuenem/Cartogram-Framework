@@ -298,7 +298,7 @@ def common_vertices(poly1, poly2, tolerance=1e-8):
     return common
 
 
-def shared_vertices_of_neighbors(polygons, tolerance=1e-8):
+def shared_vertices_of_neighbors(polygons, tolerance=1e-1):
     """
     Return a list of [i, j, shared_points] where:
       - i, j are indices of neighbouring polygons

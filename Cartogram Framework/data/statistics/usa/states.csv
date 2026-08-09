@@ -1,400 +1,52 @@
-Entity,Code,Year,all years
-Alabama,,2010,4785492.0
-Alabama,,2011,4799918.0
-Alabama,,2012,4815960.0
-Alabama,,2013,4829479.0
-Alabama,,2014,4843214.0
-Alabama,,2015,4853875.0
-Alabama,,2016,4863300.0
-Alaska,,2010,714031.0
-Alaska,,2011,722713.0
-Alaska,,2012,731089.0
-Alaska,,2013,736879.0
-Alaska,,2014,736705.0
-Alaska,,2015,737709.0
-Alaska,,2016,741894.0
-Arizona,,2010,6408312.0
-Arizona,,2011,6467163.0
-Arizona,,2012,6549634.0
-Arizona,,2013,6624617.0
-Arizona,,2014,6719993.0
-Arizona,,2015,6817565.0
-Arizona,,2016,6931071.0
-Arkansas,,2010,2921995.0
-Arkansas,,2011,2939493.0
-Arkansas,,2012,2950685.0
-Arkansas,,2013,2958663.0
-Arkansas,,2014,2966912.0
-Arkansas,,2015,2977853.0
-Arkansas,,2016,2988248.0
-California,,2010,37332685.0
-California,,2011,37676861.0
-California,,2012,38011074.0
-California,,2013,38335203.0
-California,,2014,38680810.0
-California,,2015,38993940.0
-California,,2016,39250017.0
-Colorado,,2010,5048644.0
-Colorado,,2011,5118360.0
-Colorado,,2012,5189867.0
-Colorado,,2013,5267603.0
-Colorado,,2014,5349648.0
-Colorado,,2015,5448819.0
-Colorado,,2016,5540545.0
-Connecticut,,2010,3579899.0
-Connecticut,,2011,3589893.0
-Connecticut,,2012,3593795.0
-Connecticut,,2013,3596003.0
-Connecticut,,2014,3591873.0
-Connecticut,,2015,3584730.0
-Connecticut,,2016,3576452.0
-Delaware,,2010,899816.0
-Delaware,,2011,907924.0
-Delaware,,2012,916993.0
-Delaware,,2013,925395.0
-Delaware,,2014,934948.0
-Delaware,,2015,944076.0
-Delaware,,2016,952065.0
-District of Columbia,,2010,605183.0
-District of Columbia,,2011,620477.0
-District of Columbia,,2012,635327.0
-District of Columbia,,2013,649165.0
-District of Columbia,,2014,659005.0
-District of Columbia,,2015,670377.0
-District of Columbia,,2016,681170.0
-Florida,,2010,18849098.0
-Florida,,2011,19096952.0
-Florida,,2012,19344156.0
-Florida,,2013,19582022.0
-Florida,,2014,19888741.0
-Florida,,2015,20244914.0
-Florida,,2016,20612439.0
-Georgia,,2010,9713521.0
-Georgia,,2011,9811610.0
-Georgia,,2012,9914668.0
-Georgia,,2013,9984938.0
-Georgia,,2014,10087231.0
-Georgia,,2015,10199398.0
-Georgia,,2016,10310371.0
-Hawaii,,2010,1363945.0
-Hawaii,,2011,1377864.0
-Hawaii,,2012,1391820.0
-Hawaii,,2013,1406481.0
-Hawaii,,2014,1416349.0
-Hawaii,,2015,1425157.0
-Hawaii,,2016,1428557.0
-Idaho,,2010,1571010.0
-Idaho,,2011,1584143.0
-Idaho,,2012,1595911.0
-Idaho,,2013,1612011.0
-Idaho,,2014,1633532.0
-Idaho,,2015,1652828.0
-Idaho,,2016,1683140.0
-Illinois,,2010,12841578.0
-Illinois,,2011,12860012.0
-Illinois,,2012,12870798.0
-Illinois,,2013,12879505.0
-Illinois,,2014,12867544.0
-Illinois,,2015,12839047.0
-Illinois,,2016,12801539.0
-Indiana,,2010,6490528.0
-Indiana,,2011,6516480.0
-Indiana,,2012,6537743.0
-Indiana,,2013,6569102.0
-Indiana,,2014,6595233.0
-Indiana,,2015,6612768.0
-Indiana,,2016,6633053.0
-Iowa,,2010,3050738.0
-Iowa,,2011,3065223.0
-Iowa,,2012,3076310.0
-Iowa,,2013,3091930.0
-Iowa,,2014,3108030.0
-Iowa,,2015,3121997.0
-Iowa,,2016,3134693.0
-Kansas,,2010,2858850.0
-Kansas,,2011,2869503.0
-Kansas,,2012,2885262.0
-Kansas,,2013,2892821.0
-Kansas,,2014,2899360.0
-Kansas,,2015,2906721.0
-Kansas,,2016,2907289.0
-Kentucky,,2010,4348662.0
-Kentucky,,2011,4369354.0
-Kentucky,,2012,4384799.0
-Kentucky,,2013,4400477.0
-Kentucky,,2014,4413057.0
-Kentucky,,2015,4424611.0
-Kentucky,,2016,4436974.0
-Louisiana,,2010,4544996.0
-Louisiana,,2011,4575404.0
-Louisiana,,2012,4603429.0
-Louisiana,,2013,4626402.0
-Louisiana,,2014,4647880.0
-Louisiana,,2015,4668960.0
-Louisiana,,2016,4681666.0
-Maine,,2010,1327730.0
-Maine,,2011,1328231.0
-Maine,,2012,1328895.0
-Maine,,2013,1329076.0
-Maine,,2014,1330719.0
-Maine,,2015,1329453.0
-Maine,,2016,1331479.0
-Maryland,,2010,5788584.0
-Maryland,,2011,5843603.0
-Maryland,,2012,5889651.0
-Maryland,,2013,5931129.0
-Maryland,,2014,5967295.0
-Maryland,,2015,5994983.0
-Maryland,,2016,6016447.0
-Massachusetts,,2010,6565524.0
-Massachusetts,,2011,6611923.0
-Massachusetts,,2012,6658008.0
-Massachusetts,,2013,6706786.0
-Massachusetts,,2014,6749911.0
-Massachusetts,,2015,6784240.0
-Massachusetts,,2016,6811779.0
-Michigan,,2010,9877495.0
-Michigan,,2011,9876213.0
-Michigan,,2012,9887238.0
-Michigan,,2013,9898982.0
-Michigan,,2014,9915767.0
-Michigan,,2015,9917715.0
-Michigan,,2016,9928300.0
-Midwest,,2010,66978602.0
-Midwest,,2011,67153331.0
-Midwest,,2012,67332320.0
-Midwest,,2013,67543948.0
-Midwest,,2014,67726368.0
-Midwest,,2015,67838387.0
-Midwest,,2016,67941429.0
-Minnesota,,2010,5311147.0
-Minnesota,,2011,5348562.0
-Minnesota,,2012,5380285.0
-Minnesota,,2013,5418521.0
-Minnesota,,2014,5453109.0
-Minnesota,,2015,5482435.0
-Minnesota,,2016,5519952.0
-Mississippi,,2010,2970322.0
-Mississippi,,2011,2978162.0
-Mississippi,,2012,2984945.0
-Mississippi,,2013,2990482.0
-Mississippi,,2014,2992400.0
-Mississippi,,2015,2989390.0
-Mississippi,,2016,2988726.0
-Missouri,,2010,5996118.0
-Missouri,,2011,6010717.0
-Missouri,,2012,6025415.0
-Missouri,,2013,6042711.0
-Missouri,,2014,6060930.0
-Missouri,,2015,6076204.0
-Missouri,,2016,6093000.0
-Montana,,2010,990641.0
-Montana,,2011,997821.0
-Montana,,2012,1005196.0
-Montana,,2013,1014314.0
-Montana,,2014,1022867.0
-Montana,,2015,1032073.0
-Montana,,2016,1042520.0
-Nebraska,,2010,1830051.0
-Nebraska,,2011,1842283.0
-Nebraska,,2012,1855725.0
-Nebraska,,2013,1868559.0
-Nebraska,,2014,1881145.0
-Nebraska,,2015,1893765.0
-Nebraska,,2016,1907116.0
-Nevada,,2010,2703284.0
-Nevada,,2011,2718379.0
-Nevada,,2012,2752565.0
-Nevada,,2013,2786464.0
-Nevada,,2014,2833013.0
-Nevada,,2015,2883758.0
-Nevada,,2016,2940058.0
-New Hampshire,,2010,1316872.0
-New Hampshire,,2011,1318473.0
-New Hampshire,,2012,1321182.0
-New Hampshire,,2013,1322687.0
-New Hampshire,,2014,1328743.0
-New Hampshire,,2015,1330111.0
-New Hampshire,,2016,1334795.0
-New Jersey,,2010,8803729.0
-New Jersey,,2011,8841243.0
-New Jersey,,2012,8873211.0
-New Jersey,,2013,8899162.0
-New Jersey,,2014,8925001.0
-New Jersey,,2015,8935421.0
-New Jersey,,2016,8944469.0
-New Mexico,,2010,2064756.0
-New Mexico,,2011,2077756.0
-New Mexico,,2012,2083784.0
-New Mexico,,2013,2085193.0
-New Mexico,,2014,2083024.0
-New Mexico,,2015,2080328.0
-New Mexico,,2016,2081015.0
-New York,,2010,19402640.0
-New York,,2011,19519529.0
-New York,,2012,19602769.0
-New York,,2013,19673546.0
-New York,,2014,19718515.0
-New York,,2015,19747183.0
-New York,,2016,19745289.0
-North Carolina,,2010,9558915.0
-North Carolina,,2011,9650963.0
-North Carolina,,2012,9746175.0
-North Carolina,,2013,9841590.0
-North Carolina,,2014,9934399.0
-North Carolina,,2015,10035186.0
-North Carolina,,2016,10146788.0
-North Dakota,,2010,674526.0
-North Dakota,,2011,685476.0
-North Dakota,,2012,702087.0
-North Dakota,,2013,724019.0
-North Dakota,,2014,739904.0
-North Dakota,,2015,756835.0
-North Dakota,,2016,757952.0
-Northeast,,2010,55388056.0
-Northeast,,2011,55632766.0
-Northeast,,2012,55829059.0
-Northeast,,2013,55988771.0
-Northeast,,2014,56116791.0
-Northeast,,2015,56184737.0
-Northeast,,2016,56209510.0
-Ohio,,2010,11540983.0
-Ohio,,2011,11544824.0
-Ohio,,2012,11550839.0
-Ohio,,2013,11570022.0
-Ohio,,2014,11594408.0
-Ohio,,2015,11605090.0
-Ohio,,2016,11614373.0
-Oklahoma,,2010,3759603.0
-Oklahoma,,2011,3786274.0
-Oklahoma,,2012,3817054.0
-Oklahoma,,2013,3852415.0
-Oklahoma,,2014,3877499.0
-Oklahoma,,2015,3907414.0
-Oklahoma,,2016,3923561.0
-Oregon,,2010,3838048.0
-Oregon,,2011,3868031.0
-Oregon,,2012,3899116.0
-Oregon,,2013,3925751.0
-Oregon,,2014,3968371.0
-Oregon,,2015,4024634.0
-Oregon,,2016,4093465.0
-Pennsylvania,,2010,12712343.0
-Pennsylvania,,2011,12744293.0
-Pennsylvania,,2012,12771854.0
-Pennsylvania,,2013,12781338.0
-Pennsylvania,,2014,12790565.0
-Pennsylvania,,2015,12791904.0
-Pennsylvania,,2016,12784227.0
-Puerto Rico,,2010,3721525.0
-Puerto Rico,,2011,3678732.0
-Puerto Rico,,2012,3634488.0
-Puerto Rico,,2013,3593077.0
-Puerto Rico,,2014,3534874.0
-Puerto Rico,,2015,3473181.0
-Puerto Rico,,2016,3411307.0
-Rhode Island,,2010,1053337.0
-Rhode Island,,2011,1052451.0
-Rhode Island,,2012,1052901.0
-Rhode Island,,2013,1053033.0
-Rhode Island,,2014,1054480.0
-Rhode Island,,2015,1055607.0
-Rhode Island,,2016,1056426.0
-South,,2010,114863114.0
-South,,2011,116061801.0
-South,,2012,117299171.0
-South,,2013,118424320.0
-South,,2014,119696311.0
-South,,2015,121039206.0
-South,,2016,122319574.0
-South Carolina,,2010,4635943.0
-South Carolina,,2011,4672637.0
-South Carolina,,2012,4720760.0
-South Carolina,,2013,4767894.0
-South Carolina,,2014,4828430.0
-South Carolina,,2015,4894834.0
-South Carolina,,2016,4961119.0
-South Dakota,,2010,816325.0
-South Dakota,,2011,824398.0
-South Dakota,,2012,834441.0
-South Dakota,,2013,844922.0
-South Dakota,,2014,852561.0
-South Dakota,,2015,857919.0
-South Dakota,,2016,865454.0
-Tennessee,,2010,6356671.0
-Tennessee,,2011,6397634.0
-Tennessee,,2012,6454306.0
-Tennessee,,2013,6494821.0
-Tennessee,,2014,6544663.0
-Tennessee,,2015,6595056.0
-Tennessee,,2016,6651194.0
-Texas,,2010,25244310.0
-Texas,,2011,25646389.0
-Texas,,2012,26071655.0
-Texas,,2013,26473525.0
-Texas,,2014,26944751.0
-Texas,,2015,27429639.0
-Texas,,2016,27862596.0
-United States,,2010,309348193.0
-United States,,2011,311663358.0
-United States,,2012,313998379.0
-United States,,2013,316204908.0
-United States,,2014,318563456.0
-United States,,2015,320896618.0
-United States,,2016,323127513.0
-Utah,,2010,2775326.0
-Utah,,2011,2816124.0
-Utah,,2012,2855782.0
-Utah,,2013,2902663.0
-Utah,,2014,2941836.0
-Utah,,2015,2990632.0
-Utah,,2016,3051217.0
-Vermont,,2010,625982.0
-Vermont,,2011,626730.0
-Vermont,,2012,626444.0
-Vermont,,2013,627140.0
-Vermont,,2014,626984.0
-Vermont,,2015,626088.0
-Vermont,,2016,624594.0
-Virginia,,2010,8025773.0
-Virginia,,2011,8110035.0
-Virginia,,2012,8192048.0
-Virginia,,2013,8262692.0
-Virginia,,2014,8317372.0
-Virginia,,2015,8367587.0
-Virginia,,2016,8411808.0
-Washington,,2010,6743226.0
-Washington,,2011,6822520.0
-Washington,,2012,6895226.0
-Washington,,2013,6968006.0
-Washington,,2014,7054196.0
-Washington,,2015,7160290.0
-Washington,,2016,7288000.0
-West,,2010,72118421.0
-West,,2011,72815460.0
-West,,2012,73537829.0
-West,,2013,74247869.0
-West,,2014,75023986.0
-West,,2015,75834288.0
-West,,2016,76657000.0
-West Virginia,,2010,1854230.0
-West Virginia,,2011,1854972.0
-West Virginia,,2012,1856560.0
-West Virginia,,2013,1853231.0
-West Virginia,,2014,1848514.0
-West Virginia,,2015,1841053.0
-West Virginia,,2016,1831102.0
-Wisconsin,,2010,5690263.0
-Wisconsin,,2011,5709640.0
-Wisconsin,,2012,5726177.0
-Wisconsin,,2013,5742854.0
-Wisconsin,,2014,5758377.0
-Wisconsin,,2015,5767891.0
-Wisconsin,,2016,5778708.0
-Wyoming,,2010,564513.0
-Wyoming,,2011,567725.0
-Wyoming,,2012,576765.0
-Wyoming,,2013,582684.0
-Wyoming,,2014,583642.0
-Wyoming,,2015,586555.0
-Wyoming,,2016,585501.0
+Entity,Code,Year,electoral_college
+Alabama,,2016,9
+Alaska,,2016,3
+Arizona,,2016,11
+Arkansas,,2016,6
+California,,2016,55
+Colorado,,2016,9
+Connecticut,,2016,7
+Delaware,,2016,3
+District of Columbia,,2016,3
+Florida,,2016,29
+Georgia,,2016,16
+Hawaii,,2016,4
+Idaho,,2016,4
+Illinois,,2016,20
+Indiana,,2016,11
+Iowa,,2016,6
+Kansas,,2016,6
+Kentucky,,2016,8
+Louisiana,,2016,8
+Maine,,2016,4
+Maryland,,2016,10
+Massachusetts,,2016,11
+Michigan,,2016,16
+Minnesota,,2016,10
+Mississippi,,2016,6
+Missouri,,2016,10
+Montana,,2016,3
+Nebraska,,2016,5
+Nevada,,2016,6
+New Hampshire,,2016,4
+New Jersey,,2016,14
+New Mexico,,2016,5
+New York,,2016,29
+North Carolina,,2016,15
+North Dakota,,2016,3
+Ohio,,2016,18
+Oklahoma,,2016,7
+Oregon,,2016,7
+Pennsylvania,,2016,20
+Rhode Island,,2016,4
+South Carolina,,2016,9
+South Dakota,,2016,3
+Tennessee,,2016,11
+Texas,,2016,38
+Utah,,2016,6
+Vermont,,2016,3
+Virginia,,2016,13
+Washington,,2016,12
+West Virginia,,2016,5
+Wisconsin,,2016,10
+Wyoming,,2016,3

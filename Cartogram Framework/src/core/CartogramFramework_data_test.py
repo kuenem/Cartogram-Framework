@@ -10,7 +10,6 @@ Unified cartogram optimisation covering:
 """
 
 from __future__ import annotations
-from copy import deepcopy
 
 import numpy as np
 import cvxpy as cp
@@ -183,8 +182,6 @@ def CartogramFramework_global(
         lambda_center=lambda_center,
         lambda_topology=lambda_topology,
     )
-
-    data = deepcopy(data)  # avoid mutating the original input data
 
     # ── Apply area_scale AFTER normalisation ───────────────────────────────
     # preprocess_global already rescaled target_areas so their sum equals the
@@ -405,6 +402,12 @@ def CartogramFramework_global(
     v_set = set(map(tuple, vertical_pairs))   if vertical_pairs   is not None else set()
 
     if include_topology:
+        print(
+            f"  H/V ordering inputs: horizontal_pairs="
+            f"{len(horizontal_pairs) if horizontal_pairs is not None else 0}, "
+            f"vertical_pairs={len(vertical_pairs) if vertical_pairs is not None else 0}, "
+            f"adjacent_set={len(adjacent_set)}, n_regions={n_regions}"
+        )
         for (i, j) in adjacent_set:
             # Only form hor/ver slack for adjacent pairs (T)
             ta_i = target_areas[i]
@@ -441,29 +444,54 @@ def CartogramFramework_global(
             pairwise_terms.append(hor + ver + bij * d_var)
 
         # Hard ordering constraints for H and V pairs (eqs. 11–12)
+        # NOTE: hard ordering is only meaningful (and only feasible) between
+        # regions that are actually adjacent — eqs. 11-12 assume a locally
+        # touching pair, not a global total order. Restrict to adjacent_set
+        # here to match the soft slack loop above; otherwise a
+        # horizontal_pairs/vertical_pairs list containing non-adjacent (or
+        # full O(n^2) pairwise) entries forces every region into a single
+        # strict monotonic chain on both axes simultaneously, collapsing the
+        # whole layout onto a diagonal staircase.
         all_pairs_seen: set[tuple[int, int]] = set()
+        skipped_h = 0
         if horizontal_pairs is not None:
             for (i, j) in horizontal_pairs:
                 key = (min(i, j), max(i, j))
-                if key not in all_pairs_seen:
-                    ta_i = target_areas[i];  ta_j = target_areas[j]
-                    w = (np.sqrt(ta_i) + np.sqrt(ta_j)) / 2.0
-                    g = gap_ij(i, j)
-                    xi = centers_vars[i][0];  xj = centers_vars[j][0]
-                    constraints.append(xj - xi >= w + g)
-                    all_pairs_seen.add(key)
+                if key in all_pairs_seen:
+                    continue
+                if not is_adjacent(i, j):
+                    skipped_h += 1
+                    continue
+                ta_i = target_areas[i];  ta_j = target_areas[j]
+                w = (np.sqrt(ta_i) + np.sqrt(ta_j)) / 2.0
+                g = gap_ij(i, j)
+                xi = centers_vars[i][0];  xj = centers_vars[j][0]
+                constraints.append(xj - xi >= w + g)
+                all_pairs_seen.add(key)
 
         all_pairs_seen_v: set[tuple[int, int]] = set()
+        skipped_v = 0
         if vertical_pairs is not None:
             for (i, j) in vertical_pairs:
                 key = (min(i, j), max(i, j))
-                if key not in all_pairs_seen_v:
-                    ta_i = target_areas[i];  ta_j = target_areas[j]
-                    w = (np.sqrt(ta_i) + np.sqrt(ta_j)) / 2.0
-                    g = gap_ij(i, j)
-                    yi = centers_vars[i][1];  yj = centers_vars[j][1]
-                    constraints.append(yj - yi >= w + g)
-                    all_pairs_seen_v.add(key)
+                if key in all_pairs_seen_v:
+                    continue
+                if not is_adjacent(i, j):
+                    skipped_v += 1
+                    continue
+                ta_i = target_areas[i];  ta_j = target_areas[j]
+                w = (np.sqrt(ta_i) + np.sqrt(ta_j)) / 2.0
+                g = gap_ij(i, j)
+                yi = centers_vars[i][1];  yj = centers_vars[j][1]
+                constraints.append(yj - yi >= w + g)
+                all_pairs_seen_v.add(key)
+
+        if skipped_h or skipped_v:
+            print(
+                f"  Hard H/V ordering: skipped {skipped_h} non-adjacent "
+                f"horizontal_pairs and {skipped_v} non-adjacent vertical_pairs "
+                f"(hard ordering is only applied between adjacent regions)."
+            )
 
     topology_term = cp.sum(pairwise_terms) if pairwise_terms else cp.Constant(0.0)
 

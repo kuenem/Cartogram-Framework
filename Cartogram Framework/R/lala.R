@@ -12,7 +12,7 @@ pop   <- read.csv("/home/kuenem/Documents/development/lectures/Master Thesis/Car
 
 dworld <- world %>%
   left_join(pop, by = "ISO_CODE") %>%
-  rename(pop = `Population..people.`)   # do this immediately after the join
+  rename(pop = `Population..people.`)   # do this immediately after the joins
 
 world_proj <- st_transform(dworld, "ESRI:54009")
 world_proj <- st_make_valid(world_proj)

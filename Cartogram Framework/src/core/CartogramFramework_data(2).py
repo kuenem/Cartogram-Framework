@@ -10,7 +10,6 @@ Unified cartogram optimisation covering:
 """
 
 from __future__ import annotations
-from copy import deepcopy
 
 import numpy as np
 import cvxpy as cp
@@ -118,7 +117,7 @@ def CartogramFramework_global(
     leader_tol: float = 1e-3,
 
     # ── Approach 1: soft mean-scale + looser t_max ─────────────────────────
-    soft_mean_scale: bool = True,
+    soft_mean_scale: bool = False,
     # Replace the hard mean(t)==s equality with a quadratic soft penalty.
     # Allows t_max to bite without forcing infeasibility: the solver can
     # let mean(t) deviate from s slightly if t_max would otherwise be
@@ -183,8 +182,6 @@ def CartogramFramework_global(
         lambda_center=lambda_center,
         lambda_topology=lambda_topology,
     )
-
-    data = deepcopy(data)  # avoid mutating the original input data
 
     # ── Apply area_scale AFTER normalisation ───────────────────────────────
     # preprocess_global already rescaled target_areas so their sum equals the
@@ -419,15 +416,12 @@ def CartogramFramework_global(
             ver = cp.Variable(nonneg=True, name=f"ver_{i}_{j}")
 
             # Excess-distance constraints (eqs. 13–14), linearised absolute value
-            # constraints += [
-            #     hor >= (xi - xj) - w + g,
-            #     hor >= (xj - xi) - w + g,
-            #     ver >= (yi - yj) - w + g,
-            #     ver >= (yj - yi) - w + g,
-            # ]
-
-            slack = cp.Variable(nonneg=True)
-            constraints += [slack >= (w + g) - (xj - xi)]     # only a lower bound -> always feasible
+            constraints += [
+                hor >= (xi - xj) - w + g,
+                hor >= (xj - xi) - w + g,
+                ver >= (yi - yj) - w + g,
+                ver >= (yj - yi) - w + g,
+            ]
 
             # Directional deviation d_ij (eq. 15)
             diag_expr = yi + alpha * (xj - xi) - yj
@@ -787,13 +781,13 @@ def CartogramFramework_global(
         actual_areas = [polygon_areanp(p) for p in new_polygons]
 
     # overlap_area_lost is always 0.0: the overlap-resolution post-processing
-        # pass (resolve_polygon_overlaps) was removed as unused dead code — it was
-        # never enabled by any call in exploration.ipynb. The field is kept in the
-        # per-region record for downstream compatibility (e.g. plotting code that
-        # expects the key to exist).
-        overlap_area_lost = [0.0] * n_regions
+    # pass (resolve_polygon_overlaps) was removed as unused dead code — it was
+    # never enabled by any call in exploration.ipynb. The field is kept in the
+    # per-region record for downstream compatibility (e.g. plotting code that
+    # expects the key to exist).
+    overlap_area_lost = [0.0] * n_regions
 
- # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # 10. Populate the data dict — single source of truth for results.
     #     Per-region results go on each record; solve-level results
     #     (status, objective, leaders) go under the reserved "__meta__" key.
@@ -812,7 +806,7 @@ def CartogramFramework_global(
         record["new_area"] = float(actual_areas[idx])
         record["target_area"] = float(target_areas[idx])
         record["new_centroid"] = np.mean(solved_polygon, axis=0)
-        # record["overlap_area_lost"] = float(overlap_area_lost[idx])
+        record["overlap_area_lost"] = float(overlap_area_lost[idx])
         record["status"] = prob.status
         record["objective_value"] = prob.value
         record["constraints"] = constraints
@@ -911,3 +905,4 @@ def close_contiguous_gaps(
             result[j][l] = snapped
 
     return result
+

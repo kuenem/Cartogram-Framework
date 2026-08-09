@@ -33,10 +33,10 @@ from src.io import *
 # to change.
 NAME_COLUMN_CANDIDATES: List[str] = [
     "Entity", "ISO_CODE", "NUTS_NAME", "shapeName", "GEN",
-    "coty_name", "krs_name_short", "statnaam", "name", "NAME",
+    "coty_name", "krs_name_short", "statnaam", "name", "NAME", "NAME_1",
 ]
 VALUE_COLUMN_CANDIDATES: List[str] = [
-    "Population (people)", "all years", "Population", "value", "Value",
+    "Population (people)", "all years", "Population", "value", "Value", "gdp", "electoral_college", 
 ]
 
 

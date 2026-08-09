@@ -34,6 +34,10 @@ def get_all_points(path_to_file, verbose=False):
             name = feature["properties"]["krs_name_short"][0]
         elif "statnaam" in feature["properties"]:
             name = feature["properties"]["statnaam"]
+        elif "NAME_1" in feature["properties"]:
+            name = feature["properties"]["NAME_1"]
+        elif "ADM1_EN" in feature["properties"]:
+            name = feature["properties"]["ADM1_EN"]
         else:
             name = feature["properties"]["ISO_CODE"]
 
