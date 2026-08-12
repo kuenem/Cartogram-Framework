@@ -37,7 +37,7 @@ def contiguous_cartogram(region, level, year="2016"):
         soft_mean_scale   = True,
         lambda_mean_scale = 1e4,
         t_min = 0.01,
-        t_max = 1.5,
+        t_max = 5.5,
         lambda_vertex_distance = 10.0,
         vertex_distance_margin = 1.5,
         lambda_repulsion  = 0.0,
@@ -50,8 +50,9 @@ def contiguous_cartogram(region, level, year="2016"):
         b       = 1e-2,
 
         # ── Post-processing ───────────────────────────────────────────
-        postprocess_contiguous  = True,     # flip to False to skip entirely
+        postprocess_contiguous  = False,     # flip to False to skip entirely
         postprocess_snap_method = "mean",   # midpoint snap on shared vertices
+        postprocess_disputed_pixels = True,
     )
 
     return new_data

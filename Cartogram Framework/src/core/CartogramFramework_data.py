@@ -113,6 +113,7 @@ def CartogramFramework_global(
     #   "mean" — snap both sides to their midpoint (default, symmetric)
     #   "i"    — polygon j's vertex moves to polygon i's position
     #   "j"    — polygon i's vertex moves to polygon j's position
+    postprocess_disputed_pixels: bool = False,
 
     compute_leaders_flag: bool = True,
     leader_tol: float = 1e-3,
@@ -786,6 +787,18 @@ def CartogramFramework_global(
 
         actual_areas = [polygon_areanp(p) for p in new_polygons]
 
+    if postprocess_disputed_pixels:
+        new_polygons = resolve_disputed_pixels_by_proximity(
+            polygons = new_polygons,
+            resolution = 500,
+            region_order = None,
+            bounds = None,
+            simplify_tolerance = 0.0,
+            return_raster = False,
+        )
+
+        actual_areas = [polygon_areanp(p) for p in new_polygons]
+
     # overlap_area_lost is always 0.0: the overlap-resolution post-processing
         # pass (resolve_polygon_overlaps) was removed as unused dead code — it was
         # never enabled by any call in exploration.ipynb. The field is kept in the
@@ -817,6 +830,8 @@ def CartogramFramework_global(
         record["objective_value"] = prob.value
         record["constraints"] = constraints
         record["objective"] = objective
+        print(constraints)
+        print(objective)
 
     # data["__meta__"] = {
     #     "status": prob.status,
@@ -840,42 +855,6 @@ def close_contiguous_gaps(
     method: str = "mean",
     tolerance: float = 1e-8,
 ) -> list:
-    """
-    Post-processing: snap shared border vertices of neighbouring polygons
-    to exactly the same coordinate, closing gaps/overlaps left by contiguous2.
-
-    The key design: vertex identity is established by ORIGINAL INDEX, not by
-    searching for the nearest point in the optimised geometry.  After
-    optimisation vertices may have moved significantly, so nearest-neighbour
-    search picks the wrong vertex and creates the crossing/tangling artefacts
-    visible when the naive approach is used.
-
-    Instead we use find_shared_vertex_indices() which looks up each shared
-    point in the ORIGINAL polygon arrays (coordinate-matched) and returns
-    stable (k, l) index pairs.  Those same indices are then used to read and
-    write the OPTIMISED arrays — correct regardless of how far vertices drifted.
-
-    Parameters
-    ----------
-    polygons : list[np.ndarray]
-        Optimised polygons returned by CartogramFramework_global.
-    shared_vertices_of_neighbors_data : list
-        Output of shared_vertices_of_neighbors(original_polygons).
-    original_polygons : list[np.ndarray]
-        The ORIGINAL (pre-optimisation) polygons, used only to resolve
-        which vertex index in each polygon is the shared one.
-    method : str
-        "mean" — snap both sides to their midpoint (symmetric, default).
-        "i"    — move polygon j's vertex to polygon i's current position.
-        "j"    — move polygon i's vertex to polygon j's current position.
-    tolerance : float
-        Coordinate-matching tolerance (same value used when computing
-        shared_vertices_of_neighbors_data).
-
-    Returns
-    -------
-    list[np.ndarray]  — new list of polygons with shared vertices snapped.
-    """
     # Work on copies so the input is never mutated
     result = [np.array(p, dtype=float) for p in polygons]
     orig   = [np.asarray(p, dtype=float) for p in original_polygons]
@@ -911,3 +890,181 @@ def close_contiguous_gaps(
             result[j][l] = snapped
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Post-processing: assign disputed raster pixels to the nearest
+# undisputed region (does NOT move any vertices)
+# ---------------------------------------------------------------------------
+
+def resolve_disputed_pixels_by_proximity(
+    polygons: list,
+    resolution: int = 500,
+    region_order: Optional[list] = None,
+    bounds: Optional[tuple] = None,
+    simplify_tolerance: float = 0.0,
+    return_raster: bool = False,
+):
+    from matplotlib.path import Path
+    from scipy.ndimage import distance_transform_edt
+ 
+    n_regions = len(polygons)
+    if n_regions == 0:
+        raise ValueError("polygons must contain at least one region")
+ 
+    polys = [np.asarray(p, dtype=float) for p in polygons]
+ 
+    if region_order is None:
+        region_order = list(range(n_regions))
+    priority = {r: rank for rank, r in enumerate(region_order)}
+    for r in range(n_regions):
+        priority.setdefault(r, n_regions + r)  # any region missing from
+        # region_order falls back to input order, after the explicit list
+ 
+    # ---- combined bounding box --------------------------------------------
+    if bounds is None:
+        all_xy = np.vstack(polys)
+        xmin, ymin = all_xy.min(axis=0)
+        xmax, ymax = all_xy.max(axis=0)
+        pad_x = (xmax - xmin) * 0.01 or 1e-6
+        pad_y = (ymax - ymin) * 0.01 or 1e-6
+        xmin, xmax = xmin - pad_x, xmax + pad_x
+        ymin, ymax = ymin - pad_y, ymax + pad_y
+    else:
+        xmin, ymin, xmax, ymax = bounds
+ 
+    width, height = xmax - xmin, ymax - ymin
+    if width >= height:
+        nx = max(int(resolution), 2)
+        pixel_size = width / nx
+        ny = max(int(round(height / pixel_size)), 2)
+    else:
+        ny = max(int(resolution), 2)
+        pixel_size = height / ny
+        nx = max(int(round(width / pixel_size)), 2)
+ 
+    # pixel-centre coordinates
+    xs = xmin + (np.arange(nx) + 0.5) * pixel_size
+    ys = ymin + (np.arange(ny) + 0.5) * pixel_size
+    grid_x, grid_y = np.meshgrid(xs, ys)          # shape (ny, nx)
+    points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+ 
+    # ---- rasterise each region ---------------------------------------------
+    masks = np.zeros((n_regions, ny, nx), dtype=bool)
+    for r, poly in enumerate(polys):
+        inside = Path(poly).contains_points(points, radius=1e-9)
+        masks[r] = inside.reshape(ny, nx)
+ 
+    coverage_count = masks.sum(axis=0)
+    undisputed_masks = masks & (coverage_count == 1)[None, :, :]
+ 
+    # ---- distance (in pixels) from every cell to each region's undisputed body
+    dist_to_undisputed = np.full((n_regions, ny, nx), np.inf)
+    for r in range(n_regions):
+        if undisputed_masks[r].any():
+            dist_to_undisputed[r] = distance_transform_edt(~undisputed_masks[r])
+        # else: stays +inf -- region r has no solid undisputed body to
+        # measure distance from, so it can only win via plain priority.
+ 
+    # Regions that don't even claim a given pixel are never candidates there.
+    dist_masked = np.where(masks, dist_to_undisputed, np.inf)   # (n_regions, ny, nx)
+ 
+    # Reorder the region axis by tie-break priority (highest priority first).
+    # np.argmin returns the FIRST index achieving the minimum, so on an exact
+    # distance tie this naturally picks the highest-priority region -- no
+    # separate tie-break pass needed.
+    order = sorted(range(n_regions), key=lambda r: priority[r])
+    dist_ordered = dist_masked[order]
+    winner_in_order = np.argmin(dist_ordered, axis=0)
+    winner = np.asarray(order)[winner_in_order]
+ 
+    label_grid = np.where(coverage_count > 0, winner, -1).astype(int)
+ 
+    # ---- trace region boundaries back out of the resolved raster ----------
+    from skimage.measure import find_contours, approximate_polygon
+ 
+    # Pad with a sentinel border so every region's mask is fully enclosed
+    # (no contour touches the array edge, so all traced contours are closed
+    # loops we can turn straight into polygons).
+    padded = np.full((label_grid.shape[0] + 2, label_grid.shape[1] + 2), -999, dtype=int)
+    padded[1:-1, 1:-1] = label_grid
+ 
+    result_polygons = []
+    n_empty_norasterize = 0
+    n_empty_swallowed = 0
+    for r in range(n_regions):
+        mask = (padded == r).astype(float)
+ 
+        if not mask.any():
+            result_polygons.append(polys[r].copy())
+            if masks[r].any():
+                # It DID cover some raster pixels, but lost every one of
+                # them to higher-priority neighbours (no undisputed core of
+                # its own to win ties/distance with) -- fully swallowed.
+                n_empty_swallowed += 1
+            else:
+                # It never rasterised at all: smaller than a pixel at this
+                # resolution relative to the bounding box.
+                n_empty_norasterize += 1
+            continue
+ 
+        contours = find_contours(mask, level=0.5)
+        if not contours:
+            result_polygons.append(polys[r].copy())
+            n_empty_swallowed += 1
+            continue
+ 
+        # A region can trace into several disconnected loops (e.g. if it
+        # got fully cut in two by neighbours); keep the largest by area as
+        # the region's boundary, matching the one-polygon-per-region
+        # convention used throughout this module.
+        best = None
+        best_area = -1.0
+        for c in contours:
+            # c is (row, col) in PADDED pixel-index space, subpixel accurate
+            row, col = c[:, 0], c[:, 1]
+            x = xmin + (col - 1 + 0.5) * pixel_size
+            y = ymin + (row - 1 + 0.5) * pixel_size
+            poly_xy = np.column_stack([x, y])
+            area = abs(polygon_areanp(poly_xy))
+            if area > best_area:
+                best_area = area
+                best = poly_xy
+ 
+        # find_contours closes the loop by repeating the first point --
+        # drop the duplicate to match the open-ring convention used for
+        # `polygons` elsewhere in this module.
+        if len(best) > 1 and np.allclose(best[0], best[-1]):
+            best = best[:-1]
+ 
+        if simplify_tolerance > 0 and len(best) > 3:
+            best = approximate_polygon(best, tolerance=simplify_tolerance)
+            if len(best) > 1 and np.allclose(best[0], best[-1]):
+                best = best[:-1]
+ 
+        result_polygons.append(best)
+ 
+    if n_empty_norasterize or n_empty_swallowed:
+        import warnings
+        warnings.warn(
+            f"resolve_disputed_pixels_by_proximity: {n_empty_norasterize} region(s) "
+            f"never rasterised at resolution={resolution} (too small relative to the "
+            f"bounding box -- try raising `resolution`), and {n_empty_swallowed} "
+            f"region(s) lost every pixel to higher-priority neighbours (fully "
+            f"swallowed -- check `region_order` / overlap amount). All of these were "
+            f"kept as their ORIGINAL (pre-resolution) polygon instead of being "
+            f"dropped, so region count and `polygon_areanp(p)` stay well-defined for "
+            f"every entry, but they were NOT actually disputed-pixel-resolved.",
+            stacklevel=2,
+        )
+ 
+    if return_raster:
+        raster_info = {
+            "label_grid": label_grid,
+            "coverage_count": coverage_count,
+            "extent": (xmin, ymin, xmax, ymax),
+            "pixel_size": pixel_size,
+        }
+        return result_polygons, raster_info
+ 
+    return result_polygons
