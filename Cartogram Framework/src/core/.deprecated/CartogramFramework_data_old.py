@@ -55,6 +55,30 @@ def CartogramFramework_global(
     shared_vertices_of_neighbors=None,
     # list of [i, j, shared_points] from shared_vertices_of_neighbors()
     shared_vertex_tolerance: float = 1e-8,
+    # Coordinate-matching tolerance used to map each shared_points entry
+    # back to actual (k, l) vertex INDICES in the two polygons — this
+    # governs BOTH which vertices get locked (pinned to u=0, excluded
+    # from tangential freedom / vertex repulsion) AND which vertex pairs
+    # the contiguous coupling penalty actually pulls together, so a
+    # mismatch here silently breaks both mechanisms at once.
+    # IMPORTANT: this MUST be set to (at least) whatever tolerance you
+    # used when building shared_vertices_of_neighbors(polygons, ...)
+    # yourself — they're independent numbers and previously this one was
+    # silently hardcoded to 1e-8 regardless of what you passed there.
+    # 1e-8 in lat/lon degrees is ~1.1mm — real shapefile data is very
+    # unlikely to match that tightly between two independently-stored
+    # polygons even when they DO share a real border. If regions that
+    # should be adjacent are drifting apart, or free vertices are moving
+    # in ways that create overlap right where a real shared border is,
+    # try loosening both tolerances together (e.g. 1e-6, 1e-5, 1e-4 —
+    # whatever is small relative to your coordinate units but larger than
+    # your data's actual floating-point noise).
+
+    # --- objective weights (λ) ---
+    # Each is either set directly here, or left as None so its legacy
+    # quality-criterion equivalent below governs instead (see
+    # preprocess_global). Whichever one is non-None wins OUTRIGHT for that
+    # weight — the two never combine, multiply, or blend together.
     lambda_shape: Optional[float]    = None,  # λ_s -> W_shape,    else (1 - shape_deformation)
     lambda_area: Optional[float]     = None,  # λ_a -> W_area,     else cartographic_error
     lambda_center: Optional[float]   = None,  # λ_c -> W_spatial,  else spatial_deformation
@@ -153,37 +177,7 @@ def CartogramFramework_global(
     #   "i"    — polygon j's vertex moves to polygon i's position
     #   "j"    — polygon i's vertex moves to polygon j's position
     postprocess_disputed_pixels: bool = False,
-    postprocess_gaps: bool = False,
-    postprocess_raster_resolution: int = 500,
-    # Shared raster resolution for postprocess_disputed_pixels /
-    # postprocess_gaps / postprocess_equalize_areas. A single grid spans
-    # the whole combined bounding box, so small regions relative to that
-    # box get proportionally fewer pixels -- raise this for maps with a
-    # wide size range between regions (e.g. RI/DE next to TX/AK).
-    postprocess_raster_area_bias: float = 0.15,
-    # Weight of the area-deficit bias applied inside
-    # resolve_disputed_pixels_by_proximity / fill_enclosed_gaps_by_proximity:
-    # under-target regions become more competitive for disputed/gap pixels,
-    # over-target regions less so. 0.0 recovers the old pure-proximity
-    # behaviour.
-    postprocess_equalize_areas: bool = False,
-    # Final raster area-correction pass (equalize_region_areas_raster), run
-    # after postprocess_disputed_pixels / postprocess_gaps. Shifts thin
-    # boundary strips from area-surplus regions to area-deficit neighbours
-    # directly on the pixel labelling, so it can't reintroduce gaps/overlaps
-    # the way an independent per-region rescale could.
-    postprocess_equalize_max_passes: int = 30,
-    postprocess_equalize_tolerance: float = 0.01,
-    postprocess_declump_circles: bool = False,
-    # When True AND shape == "circle", runs declump_circles() over the
-    # solved centres/radii after the solve to clean up any residual
-    # overlap the in-solve penalties (lambda_repulsion / lambda_order)
-    # couldn't fully remove. Only ever moves centres — never resizes
-    # circles — so area accuracy (the whole point of Dorling) is
-    # preserved exactly; only positional accuracy is (slightly) traded.
-    circle_declump_iterations: int = 300,
-    circle_declump_step: float = 0.5,
-    
+
     compute_leaders_flag: bool = True,
     leader_tol: float = 1e-3,
 
@@ -207,17 +201,7 @@ def CartogramFramework_global(
     # If False (default), all pairs are repelled (safer for spike prevention).
     repulsion_margin: float = 1.0,
     # Minimum centre-to-centre distance (along the pair's fixed separating
-    # axis, see above) below which repulsion activates. Only used when
-    # repulsion_margin_mode="fixed" (the default / legacy behaviour).
-    repulsion_margin_mode: str = "fixed",
-    # "fixed"         — every pair uses the single scalar `repulsion_margin`
-    #                    above, regardless of region size (legacy default).
-    # "circle_radius" — per-pair margin = r_i + r_j, where
-    #                    r_k = sqrt(target_area_k / pi). This is the exact
-    #                    centre-separation needed for two target-sized
-    #                    circles not to overlap, so it's the right mode
-    #                    for shape="circle" (Dorling) anti-overlap use.
-    #                    `repulsion_margin` is ignored in this mode.
+    # axis, see above) below which repulsion activates.
 
     # ── Approach 4: tangential vertex freedom + vertex-level anti-overlap ──
     tangential_freedom: bool = False,
@@ -686,26 +670,14 @@ def CartogramFramework_global(
                 for jj in range(ii + 1, n_regions):
                     pairs_for_repulsion.append((ii, jj))
 
-        if repulsion_margin_mode not in ("fixed", "circle_radius"):
-            raise ValueError(
-                f"repulsion_margin_mode must be 'fixed' or 'circle_radius', "
-                f"got {repulsion_margin_mode!r}"
-            )
-
         for (ii, jj) in pairs_for_repulsion:
             if centers_vars[ii] is None or centers_vars[jj] is None:
                 continue
-            if repulsion_margin_mode == "circle_radius":
-                r_i = float(np.sqrt(target_areas[ii] / np.pi))
-                r_j = float(np.sqrt(target_areas[jj] / np.pi))
-                pair_margin = r_i + r_j
-            else:
-                pair_margin = repulsion_margin
             repulsion_terms.append(
                 _one_sided_repulsion(
                     _fp_vals[ii], _fp_vals[jj],
                     centers_vars[ii], centers_vars[jj],
-                    pair_margin, tag=f"c_{ii}_{jj}",
+                    repulsion_margin, tag=f"c_{ii}_{jj}",
                 )
             )
 
@@ -914,7 +886,7 @@ def CartogramFramework_global(
 
     objective = cp.Minimize(
         W_shape    * cp.sum(shape_terms)
-        + W_area * cp.sum(area_terms)
+        + W_area   * cp.sum(area_terms)
         + W_spatial * cp.sum(center_terms)
         + W_topology * topology_term
         + order_penalty                             # Fix 1b: soft hor/ver ordering
@@ -1058,7 +1030,6 @@ def CartogramFramework_global(
             adjacent_set,
             tol=leader_tol,
         )
-    qp_areas = [polygon_areanp(p) for p in new_polygons]
 
     # ------------------------------------------------------------------
     # 9. Contiguous post-processing (optional)
@@ -1079,48 +1050,13 @@ def CartogramFramework_global(
     if postprocess_disputed_pixels:
             new_polygons = resolve_disputed_pixels_by_proximity(
                 polygons = new_polygons,
-                resolution = postprocess_raster_resolution,
+                resolution = 500,
                 region_order = None,
                 bounds = None,
                 simplify_tolerance = 0.0,
                 return_raster = False,
-                target_areas = target_areas,
-                current_areas = actual_areas,
-                area_bias_strength = postprocess_raster_area_bias,
             )
     
-            actual_areas = [polygon_areanp(p) for p in new_polygons]
-
-    if postprocess_gaps:
-            new_polygons = fill_enclosed_gaps_by_proximity(
-                polygons = new_polygons,
-                resolution = postprocess_raster_resolution,
-                region_order = None,
-                bounds = None,
-                simplify_tolerance = 0.0,
-                return_raster = False,
-                target_areas = target_areas,
-                current_areas = actual_areas,
-                area_bias_strength = postprocess_raster_area_bias,
-            )
-
-            actual_areas = [polygon_areanp(p) for p in new_polygons]
-
-    if postprocess_equalize_areas:
-            print("Post-processing: equalizing region areas on the raster grid "
-                  f"(max_passes={postprocess_equalize_max_passes}, "
-                  f"tolerance={postprocess_equalize_tolerance})")
-            new_polygons = equalize_region_areas_raster(
-                polygons = new_polygons,
-                target_areas = target_areas,
-                resolution = postprocess_raster_resolution,
-                bounds = None,
-                max_passes = postprocess_equalize_max_passes,
-                tolerance = postprocess_equalize_tolerance,
-                simplify_tolerance = 0.0,
-                return_raster = False,
-            )
-
             actual_areas = [polygon_areanp(p) for p in new_polygons]
 
     overlap_area_lost = [0.0] * n_regions
@@ -1142,7 +1078,6 @@ def CartogramFramework_global(
         record.setdefault("centroid", np.mean(original_polygon, axis=0))
         record["new_polygon"] = solved_polygon
         record["new_area"] = float(actual_areas[idx])
-        record["qp_area"] = float(qp_areas[idx])
         record["target_area"] = float(target_areas[idx])
         record["new_centroid"] = np.mean(solved_polygon, axis=0)
         record["overlap_area_lost"] = float(overlap_area_lost[idx])
@@ -1150,22 +1085,6 @@ def CartogramFramework_global(
         record["objective_value"] = prob.value
         record["constraints"] = constraints
         record["objective"] = objective
-
-    if postprocess_declump_circles:
-        if base_shape != "circle":
-            print(
-                "  Warning: postprocess_declump_circles=True but shape != 'circle' "
-                "-- skipping (declumping only makes sense for Dorling circles)."
-            )
-        else:
-            print("Post-processing: removing residual circle overlap "
-                  f"(iterations={circle_declump_iterations}, step={circle_declump_step})")
-            data = postprocess_circle_overlap(
-                data,
-                region_names=region_names,
-                iterations=circle_declump_iterations,
-                step=circle_declump_step,
-            )
 
     # data["__meta__"] = {
     #     "status": prob.status,
@@ -1189,7 +1108,42 @@ def close_contiguous_gaps(
     method: str = "mean",
     tolerance: float = 1e-8,
 ) -> list:
+    """
+    Post-processing: snap shared border vertices of neighbouring polygons
+    to exactly the same coordinate, closing gaps/overlaps left by contiguous2.
 
+    The key design: vertex identity is established by ORIGINAL INDEX, not by
+    searching for the nearest point in the optimised geometry.  After
+    optimisation vertices may have moved significantly, so nearest-neighbour
+    search picks the wrong vertex and creates the crossing/tangling artefacts
+    visible when the naive approach is used.
+
+    Instead we use find_shared_vertex_indices() which looks up each shared
+    point in the ORIGINAL polygon arrays (coordinate-matched) and returns
+    stable (k, l) index pairs.  Those same indices are then used to read and
+    write the OPTIMISED arrays — correct regardless of how far vertices drifted.
+
+    Parameters
+    ----------
+    polygons : list[np.ndarray]
+        Optimised polygons returned by CartogramFramework_global.
+    shared_vertices_of_neighbors_data : list
+        Output of shared_vertices_of_neighbors(original_polygons).
+    original_polygons : list[np.ndarray]
+        The ORIGINAL (pre-optimisation) polygons, used only to resolve
+        which vertex index in each polygon is the shared one.
+    method : str
+        "mean" — snap both sides to their midpoint (symmetric, default).
+        "i"    — move polygon j's vertex to polygon i's current position.
+        "j"    — move polygon i's vertex to polygon j's current position.
+    tolerance : float
+        Coordinate-matching tolerance (same value used when computing
+        shared_vertices_of_neighbors_data).
+
+    Returns
+    -------
+    list[np.ndarray]  — new list of polygons with shared vertices snapped.
+    """
     # Work on copies so the input is never mutated
     result = [np.array(p, dtype=float) for p in polygons]
     orig   = [np.asarray(p, dtype=float) for p in original_polygons]
@@ -1228,146 +1182,6 @@ def close_contiguous_gaps(
 
 
 # ---------------------------------------------------------------------------
-# Post-processing: iterative pairwise circle-overlap removal (Dorling-style)
-# ---------------------------------------------------------------------------
-
-def declump_circles(
-    centers: list,
-    radii: list,
-    iterations: int = 300,
-    step: float = 0.5,
-    tol: float = 1e-9,
-) -> tuple:
-    """
-    Classic Dorling (1996) overlap-removal relaxation. Radii (= areas)
-    are NEVER touched — only centres move — so this can only ever
-    trade positional accuracy for zero overlap, never area accuracy.
-
-    For every still-overlapping pair, push both centres apart along the
-    line joining them by `step` * the overlap amount (0.5 = split the
-    fix evenly between the two; the classic algorithm's default), repeat
-    for up to `iterations` passes or until nothing overlaps by more than
-    `tol`.
-
-    This is a convex-solve-free O(iterations * n^2) fixup: circle
-    non-overlap at arbitrary positions isn't a convex constraint (same
-    separating-hyperplane issue as general polygon non-overlap), so this
-    kind of light relaxation pass is the standard way to close the last
-    gap after the QP, rather than something the solve itself can
-    guarantee exactly.
-
-    Parameters
-    ----------
-    centers : list of (2,) array-like
-    radii   : list of float
-    iterations : max relaxation passes
-    step : float in (0, 1]. 0.5 splits each correction evenly between
-        the two circles (recommended); 1.0 moves one circle the full
-        correction and leaves the other in place — asymmetric, only
-        useful if you want to treat one circle as pinned.
-    tol : stop once max overlap (in the same units as centers/radii) is
-        below this
-
-    Returns
-    -------
-    (new_centers, max_overlap_remaining) : (list[np.ndarray], float)
-    """
-    n = len(centers)
-    pts = [np.array(c, dtype=float) for c in centers]
-    r = [float(x) for x in radii]
-
-    max_overlap = 0.0
-    for _ in range(iterations):
-        max_overlap = 0.0
-        for i in range(n):
-            for j in range(i + 1, n):
-                delta = pts[j] - pts[i]
-                dist = float(np.linalg.norm(delta))
-                needed = r[i] + r[j]
-                overlap = needed - dist
-                if overlap <= tol:
-                    continue
-                max_overlap = max(max_overlap, overlap)
-                if dist < 1e-12:
-                    # Coincident centres: nudge apart along an arbitrary
-                    # fixed axis so the direction is deterministic.
-                    direction = np.array([1.0, 0.0])
-                else:
-                    direction = delta / dist
-                correction = direction * overlap
-                pts[i] -= correction * step
-                pts[j] += correction * (1.0 - step)
-        if max_overlap <= tol:
-            break
-
-    return pts, max_overlap
-
-
-def postprocess_circle_overlap(
-    data: dict,
-    region_names: Optional[list] = None,
-    iterations: int = 300,
-    step: float = 0.5,
-    tol: float = 1e-9,
-    n_vertices: int = 64,
-) -> dict:
-    """
-    Runs declump_circles() over every region's solved (center, radius)
-    in `data` and rewrites "new_polygon"/"new_centroid" to match.
-    "new_area" is left untouched — this pass only ever moves circles,
-    never resizes them. Intended to run AFTER CartogramFramework_global
-    with shape="circle", as a final cleanup for any overlap that
-    survived the (necessarily soft/approximate) in-solve anti-overlap
-    penalties.
-
-    Mutates `data` in place and also returns it, matching the style of
-    the rest of the framework's post-processing functions.
-    """
-    if region_names is None:
-        region_names = [name for name in data.keys() if name != "__meta__"]
-
-    centers, radii = [], []
-    for name in region_names:
-        record = data[name]
-        c = record.get("new_centroid")
-        a = record.get("new_area")
-        if c is None or a is None or not np.isfinite(a) or a <= 0:
-            # Skip degenerate/failed regions — leave them exactly as solved.
-            centers.append(None)
-            radii.append(None)
-            continue
-        centers.append(np.asarray(c, dtype=float))
-        radii.append(float(np.sqrt(a / np.pi)))
-
-    valid_idx = [k for k, c in enumerate(centers) if c is not None]
-    if len(valid_idx) < 2:
-        return data  # nothing to declump
-
-    sub_centers = [centers[k] for k in valid_idx]
-    sub_radii   = [radii[k] for k in valid_idx]
-
-    new_sub_centers, max_overlap = declump_circles(
-        sub_centers, sub_radii, iterations=iterations, step=step, tol=tol
-    )
-
-    if max_overlap > tol:
-        print(
-            f"  WARNING: declump_circles did not fully resolve overlap after "
-            f"{iterations} iterations (max remaining overlap = {max_overlap:.6g}). "
-            f"Try raising `iterations`, or check for near-duplicate target "
-            f"positions / target areas far larger than the available space."
-        )
-
-    for sub_k, k in enumerate(valid_idx):
-        name = region_names[k]
-        new_center = new_sub_centers[sub_k]
-        data[name]["new_centroid"] = new_center
-        data[name]["new_polygon"] = make_circle(new_center, data[name]["new_area"], n=n_vertices)
-
-    return data
-
-
-# ---------------------------------------------------------------------------
 # Post-processing: assign disputed raster pixels to the nearest
 # undisputed region (does NOT move any vertices)
 # ---------------------------------------------------------------------------
@@ -1379,35 +1193,7 @@ def resolve_disputed_pixels_by_proximity(
     bounds: Optional[tuple] = None,
     simplify_tolerance: float = 0.0,
     return_raster: bool = False,
-    target_areas: Optional[list] = None,
-    current_areas: Optional[list] = None,
-    area_bias_strength: float = 0.15,
 ):
-    """
-    (See module docstring for the original behaviour.)
-
-    Area-aware disputed-pixel resolution
-    -------------------------------------
-    When `target_areas` is supplied, every disputed pixel's contest is no
-    longer decided by raw proximity alone: each region's distance-to-its-
-    undisputed-core map is shifted by a bias (in pixel units) proportional
-    to how far that region currently sits below (positive bias -> "closer"
-    -> more likely to win) or above (negative bias -> "farther" -> less
-    likely to win) its own target area. This is a weighted/power-distance
-    generalisation of the original nearest-neighbour rule: ties and
-    close contests get resolved in favour of whichever region needs the
-    area more, while a region far from any given disputed pixel still
-    loses it regardless of bias (the shift is uniform across the grid, it
-    doesn't change *where* a region's core is, only how competitive it is
-    at a fixed distance). Set area_bias_strength=0.0 (or leave
-    target_areas=None) to recover the original unbiased behaviour exactly.
-
-    `current_areas`, if given, should be each region's best known area
-    *before* this call (e.g. the QP-solved area) -- this is what the
-    deficit is measured against. If omitted, it's approximated from the
-    (disputed, double-counted) raster mask footprint computed inside this
-    function, which is a weaker signal but still better than nothing.
-    """
     from matplotlib.path import Path
     from scipy.ndimage import distance_transform_edt
  
@@ -1417,15 +1203,7 @@ def resolve_disputed_pixels_by_proximity(
  
     polys = [np.asarray(p, dtype=float) for p in polygons]
  
-    # If the caller didn't supply an explicit priority order but did give
-    # target_areas, default to prioritising the most area-deficient
-    # regions first -- this only matters as an exact-distance tiebreak
-    # (the continuous bias below does the heavy lifting), but keeping it
-    # consistent avoids the tiebreak silently fighting the bias.
-    if region_order is None and target_areas is not None and current_areas is not None:
-        deficit0 = np.asarray(target_areas, dtype=float) - np.asarray(current_areas, dtype=float)
-        region_order = list(np.argsort(-deficit0))  # most-deficient first
-    elif region_order is None:
+    if region_order is None:
         region_order = list(range(n_regions))
     priority = {r: rank for rank, r in enumerate(region_order)}
     for r in range(n_regions):
@@ -1479,47 +1257,7 @@ def resolve_disputed_pixels_by_proximity(
  
     # Regions that don't even claim a given pixel are never candidates there.
     dist_masked = np.where(masks, dist_to_undisputed, np.inf)   # (n_regions, ny, nx)
-
-    # ---- area-deficit bias --------------------------------------------
-    # Shift each region's effective distance by a signed amount so that
-    # under-target regions look "closer" (win more disputed pixels) and
-    # over-target regions look "farther" (win fewer), without touching
-    # regions that were never in contention for a given pixel (masks/np.inf
-    # entries stay np.inf regardless of a finite bias).
-    if target_areas is not None and area_bias_strength != 0.0:
-        target_areas_arr = np.asarray(target_areas, dtype=float)
-        if current_areas is not None:
-            current_areas_arr = np.asarray(current_areas, dtype=float)
-            # A region that failed the QP solve (NaN area) shouldn't
-            # skew the bias -- treat it as "already at target" (zero bias)
-            # rather than propagating NaN into the whole distance map.
-            nan_mask = np.isnan(current_areas_arr)
-            if nan_mask.any():
-                current_areas_arr = np.where(nan_mask, target_areas_arr, current_areas_arr)
-        else:
-            # Fallback: raw mask footprint (double-counts disputed pixels
-            # across contesting regions, but still a usable size signal).
-            current_areas_arr = masks.sum(axis=(1, 2)) * pixel_size ** 2
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            rel_deficit = np.where(
-                target_areas_arr > 0,
-                (target_areas_arr - current_areas_arr) / target_areas_arr,
-                0.0,
-            )
-        # Clamp: a region that's catastrophically off target in the QP
-        # (rel_deficit near +-1, or worse for a region that ballooned past
-        # its own target) must NOT get an unbounded pixel-distance head
-        # start -- that lets one badly-solved region hijack disputed/gap
-        # pixels across the whole map regardless of true proximity. Capping
-        # the deficit before scaling means the bias can still decide close
-        # contests in favour of the neediest region, but can never fully
-        # override real geometric distance the way an uncapped bias could.
-        rel_deficit = np.clip(rel_deficit, -0.4, 0.4)
-        grid_scale = max(nx, ny)
-        bias = area_bias_strength * rel_deficit * grid_scale  # (n_regions,) pixel units
-        dist_masked = dist_masked - bias[:, None, None]
-
+ 
     # Reorder the region axis by tie-break priority (highest priority first).
     # np.argmin returns the FIRST index achieving the minimum, so on an exact
     # distance tie this naturally picks the highest-priority region -- no
@@ -1618,451 +1356,4 @@ def resolve_disputed_pixels_by_proximity(
         }
         return result_polygons, raster_info
  
-    return result_polygons
-
-def fill_enclosed_gaps_by_proximity(
-    polygons: list,
-    resolution: int = 500,
-    region_order: Optional[list] = None,
-    bounds: Optional[tuple] = None,
-    simplify_tolerance: float = 0.0,
-    return_raster: bool = False,
-    target_areas: Optional[list] = None,
-    current_areas: Optional[list] = None,
-    area_bias_strength: float = 0.15,
-):
-    """
-    (See resolve_disputed_pixels_by_proximity's docstring -- same
-    area-deficit bias mechanism, applied here to who wins enclosed gap
-    pixels instead of who wins disputed (overlapping) pixels.)
-    """
-
-    from matplotlib.path import Path
-    from scipy.ndimage import distance_transform_edt, binary_fill_holes
-
-    n_regions = len(polygons)
-    if n_regions == 0:
-        raise ValueError("polygons must contain at least one region")
-
-    polys = [np.asarray(p, dtype=float) for p in polygons]
-
-    if region_order is None and target_areas is not None and current_areas is not None:
-        deficit0 = np.asarray(target_areas, dtype=float) - np.asarray(current_areas, dtype=float)
-        region_order = list(np.argsort(-deficit0))  # most-deficient first
-    elif region_order is None:
-        region_order = list(range(n_regions))
-    priority = {r: rank for rank, r in enumerate(region_order)}
-    for r in range(n_regions):
-        priority.setdefault(r, n_regions + r)
-
-    # ---- combined bounding box --------------------------------------------
-    if bounds is None:
-        all_xy = np.vstack(polys)
-        xmin, ymin = all_xy.min(axis=0)
-        xmax, ymax = all_xy.max(axis=0)
-        pad_x = (xmax - xmin) * 0.01 or 1e-6
-        pad_y = (ymax - ymin) * 0.01 or 1e-6
-        xmin, xmax = xmin - pad_x, xmax + pad_x
-        ymin, ymax = ymin - pad_y, ymax + pad_y
-    else:
-        xmin, ymin, xmax, ymax = bounds
-
-    width, height = xmax - xmin, ymax - ymin
-    if width >= height:
-        nx = max(int(resolution), 2)
-        pixel_size = width / nx
-        ny = max(int(round(height / pixel_size)), 2)
-    else:
-        ny = max(int(resolution), 2)
-        pixel_size = height / ny
-        nx = max(int(round(width / pixel_size)), 2)
-
-    xs = xmin + (np.arange(nx) + 0.5) * pixel_size
-    ys = ymin + (np.arange(ny) + 0.5) * pixel_size
-    grid_x, grid_y = np.meshgrid(xs, ys)          # shape (ny, nx)
-    points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
-
-    # ---- rasterise each region ---------------------------------------------
-    masks = np.zeros((n_regions, ny, nx), dtype=bool)
-    for r, poly in enumerate(polys):
-        inside = Path(poly).contains_points(points, radius=1e-9)
-        masks[r] = inside.reshape(ny, nx)
-
-    coverage_count = masks.sum(axis=0)
-    covered_mask = coverage_count > 0
-
-    # ---- find enclosed holes: zero-coverage pixels NOT reachable from the
-    #      raster border without crossing covered territory. Filling the
-    #      holes of `covered_mask` turns exactly those pixels True; XOR-ing
-    #      back against covered_mask isolates the newly-filled ("hole")
-    #      pixels from the ones that were already covered.
-    filled = binary_fill_holes(covered_mask)
-    hole_mask = filled & ~covered_mask
-
-    # ---- distance (in pixels) from every cell to each region's body -------
-    # (Gap pixels have zero coverage by construction, so there's no overlap
-    # to disambiguate here -- the region's full mask *is* its undisputed
-    # body, unlike the sibling function which has to subtract disputed
-    # pixels first.)
-    dist_to_region = np.full((n_regions, ny, nx), np.inf)
-    for r in range(n_regions):
-        if masks[r].any():
-            dist_to_region[r] = distance_transform_edt(~masks[r])
-        # else: stays +inf -- region r has no body to measure distance from.
-
-    # ---- area-deficit bias (same mechanism as the disputed-pixel sibling) --
-    if target_areas is not None and area_bias_strength != 0.0:
-        target_areas_arr = np.asarray(target_areas, dtype=float)
-        if current_areas is not None:
-            current_areas_arr = np.asarray(current_areas, dtype=float)
-            # A region that failed the QP solve (NaN area) shouldn't
-            # skew the bias -- treat it as "already at target" (zero bias)
-            # rather than propagating NaN into the whole distance map.
-            nan_mask = np.isnan(current_areas_arr)
-            if nan_mask.any():
-                current_areas_arr = np.where(nan_mask, target_areas_arr, current_areas_arr)
-        else:
-            current_areas_arr = masks.sum(axis=(1, 2)) * pixel_size ** 2
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            rel_deficit = np.where(
-                target_areas_arr > 0,
-                (target_areas_arr - current_areas_arr) / target_areas_arr,
-                0.0,
-            )
-        # Clamp: a region that's catastrophically off target in the QP
-        # (rel_deficit near +-1, or worse for a region that ballooned past
-        # its own target) must NOT get an unbounded pixel-distance head
-        # start -- that lets one badly-solved region hijack disputed/gap
-        # pixels across the whole map regardless of true proximity. Capping
-        # the deficit before scaling means the bias can still decide close
-        # contests in favour of the neediest region, but can never fully
-        # override real geometric distance the way an uncapped bias could.
-        rel_deficit = np.clip(rel_deficit, -0.4, 0.4)
-        grid_scale = max(nx, ny)
-        bias = area_bias_strength * rel_deficit * grid_scale
-        dist_to_region = dist_to_region - bias[:, None, None]
-
-    order = sorted(range(n_regions), key=lambda r: priority[r])
-    dist_ordered = dist_to_region[order]
-    winner_in_order = np.argmin(dist_ordered, axis=0)
-    winner = np.asarray(order)[winner_in_order]
-
-
-    label_grid = np.full((ny, nx), -1, dtype=int)
-    for r in order[::-1]:
-        # iterate lowest-priority first so the final overwrite by the
-        # highest-priority region wins on any residual overlap
-        label_grid[masks[r]] = r
-    label_grid[hole_mask] = winner[hole_mask]
-
-    # ---- trace region boundaries back out of the resolved raster ----------
-    from skimage.measure import find_contours, approximate_polygon
-
-    padded = np.full((label_grid.shape[0] + 2, label_grid.shape[1] + 2), -999, dtype=int)
-    padded[1:-1, 1:-1] = label_grid
-
-    result_polygons = []
-    n_empty_norasterize = 0
-    n_empty_swallowed = 0
-    for r in range(n_regions):
-        mask = (padded == r).astype(float)
-
-        if not mask.any():
-            result_polygons.append(polys[r].copy())
-            if masks[r].any():
-                n_empty_swallowed += 1
-            else:
-                n_empty_norasterize += 1
-            continue
-
-        contours = find_contours(mask, level=0.5)
-        if not contours:
-            result_polygons.append(polys[r].copy())
-            n_empty_swallowed += 1
-            continue
-
-        best = None
-        best_area = -1.0
-        for c in contours:
-            row, col = c[:, 0], c[:, 1]
-            x = xmin + (col - 1 + 0.5) * pixel_size
-            y = ymin + (row - 1 + 0.5) * pixel_size
-            poly_xy = np.column_stack([x, y])
-            area = abs(polygon_areanp(poly_xy))
-            if area > best_area:
-                best_area = area
-                best = poly_xy
-
-        if len(best) > 1 and np.allclose(best[0], best[-1]):
-            best = best[:-1]
-
-        if simplify_tolerance > 0 and len(best) > 3:
-            best = approximate_polygon(best, tolerance=simplify_tolerance)
-            if len(best) > 1 and np.allclose(best[0], best[-1]):
-                best = best[:-1]
-
-        result_polygons.append(best)
-
-    if n_empty_norasterize or n_empty_swallowed:
-        import warnings
-        warnings.warn(
-            f"fill_enclosed_gaps_by_proximity: {n_empty_norasterize} region(s) "
-            f"never rasterised at resolution={resolution} (too small relative to the "
-            f"bounding box -- try raising `resolution`), and {n_empty_swallowed} "
-            f"region(s) lost every pixel to higher-priority neighbours (fully "
-            f"swallowed -- check `region_order`). All of these were kept as their "
-            f"ORIGINAL (pre-resolution) polygon instead of being dropped, so region "
-            f"count and `polygon_areanp(p)` stay well-defined for every entry, but "
-            f"they were NOT actually gap-filled.",
-            stacklevel=2,
-        )
-
-    if return_raster:
-        raster_info = {
-            "label_grid": label_grid,
-            "coverage_count": coverage_count,
-            "hole_mask": hole_mask,
-            "extent": (xmin, ymin, xmax, ymax),
-            "pixel_size": pixel_size,
-        }
-        return result_polygons, raster_info
-
-    return result_polygons
-
-
-# ---------------------------------------------------------------------------
-# Post-processing: final raster area-correction pass
-# ---------------------------------------------------------------------------
-
-def equalize_region_areas_raster(
-    polygons: list,
-    target_areas: list,
-    resolution: int = 500,
-    bounds: Optional[tuple] = None,
-    max_passes: int = 30,
-    tolerance: float = 0.01,
-    simplify_tolerance: float = 0.0,
-    return_raster: bool = False,
-):
-    """
-    Final area-correction pass. Run this AFTER
-    resolve_disputed_pixels_by_proximity and fill_enclosed_gaps_by_proximity
-    so the input is already gap-free and overlap-free (one owning region
-    per pixel).
-
-    Why not just rescale each polygon toward its target area? Because a
-    naive homothetic rescale moves that region's boundary vertices
-    independently of its neighbours -- exactly the shared-vertex alignment
-    resolve_disputed_pixels_by_proximity / fill_enclosed_gaps_by_proximity
-    (and, upstream, the contiguous-mode QP penalty) just spent effort
-    establishing. Re-opening gaps/overlaps to fix area would be a step
-    backward for a contiguous cartogram.
-
-    Instead, this works directly on the pixel labelling: it repeatedly
-    finds the boundary strip between an area-surplus region and an
-    area-deficit neighbour and relabels a small batch of those boundary
-    pixels from the surplus region to the deficit region. Because this
-    only ever reassigns a pixel's single owner (never creates a pixel with
-    zero or multiple owners), the result can't reintroduce gaps or
-    overlaps -- it just shifts existing shared borders by a thin margin.
-
-    Limitation: this only rebalances DIRECTLY ADJACENT surplus/deficit
-    pairs. A surplus region can't route area through an already-on-target
-    neighbour to reach a deficit region two hops away (e.g. in a C-D-E
-    chain where only C and E are off-target, nothing moves if D is
-    already satisfied, since D never volunteers to act as a pass-through).
-    This covers the common case -- a region's own error usually shows up
-    against one of its immediate neighbours -- but isn't a general
-    min-cost-flow area redistribution across the whole adjacency graph.
-
-    Returns
-    -------
-    list[np.ndarray] of corrected region polygons (same order as input),
-    or (list, raster_info) if return_raster=True.
-    """
-    from matplotlib.path import Path
-    from skimage.measure import find_contours, approximate_polygon
-    from scipy.ndimage import binary_dilation
-
-    n_regions = len(polygons)
-    if n_regions == 0:
-        raise ValueError("polygons must contain at least one region")
-
-    polys = [np.asarray(p, dtype=float) for p in polygons]
-    target_areas_arr = np.asarray(target_areas, dtype=float)
-
-    # ---- combined bounding box (same convention as the sibling functions) -
-    if bounds is None:
-        all_xy = np.vstack(polys)
-        xmin, ymin = all_xy.min(axis=0)
-        xmax, ymax = all_xy.max(axis=0)
-        pad_x = (xmax - xmin) * 0.01 or 1e-6
-        pad_y = (ymax - ymin) * 0.01 or 1e-6
-        xmin, xmax = xmin - pad_x, xmax + pad_x
-        ymin, ymax = ymin - pad_y, ymax + pad_y
-    else:
-        xmin, ymin, xmax, ymax = bounds
-
-    width, height = xmax - xmin, ymax - ymin
-    if width >= height:
-        nx = max(int(resolution), 2)
-        pixel_size = width / nx
-        ny = max(int(round(height / pixel_size)), 2)
-    else:
-        ny = max(int(resolution), 2)
-        pixel_size = height / ny
-        nx = max(int(round(width / pixel_size)), 2)
-
-    xs = xmin + (np.arange(nx) + 0.5) * pixel_size
-    ys = ymin + (np.arange(ny) + 0.5) * pixel_size
-    grid_x, grid_y = np.meshgrid(xs, ys)
-    points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
-
-    # ---- rasterise into a single label grid: one owning region per pixel --
-    # Earlier-indexed regions win any residual overlap (input is expected
-    # to already be overlap-free after the two prior passes, so this only
-    # matters for boundary rounding at this resolution).
-    label_grid = np.full((ny, nx), -1, dtype=int)
-    for r in range(n_regions - 1, -1, -1):
-        inside = Path(polys[r]).contains_points(points, radius=1e-9).reshape(ny, nx)
-        label_grid[inside] = r
-
-    px_area = pixel_size ** 2
-    current_areas = np.array(
-        [(label_grid == r).sum() * px_area for r in range(n_regions)], dtype=float
-    )
-
-    def _shifted(grid, dr, dc, fill=-1):
-        """grid value at each pixel's (dr, dc) neighbour; edges filled with `fill`."""
-        gy, gx = grid.shape
-        out = np.full_like(grid, fill)
-        src_r0, src_r1 = max(0, -dr), gy - max(0, dr)
-        src_c0, src_c1 = max(0, -dc), gx - max(0, dc)
-        dst_r0, dst_r1 = max(0, dr), gy - max(0, -dr)
-        dst_c0, dst_c1 = max(0, dc), gx - max(0, -dc)
-        out[dst_r0:dst_r1, dst_c0:dst_c1] = grid[src_r0:src_r1, src_c0:src_c1]
-        return out
-
-    neighbour_shifts = ((-1, 0), (1, 0), (0, -1), (0, 1))
-
-    for _ in range(max_passes):
-        rel_error = (target_areas_arr - current_areas) / np.maximum(target_areas_arr, 1e-12)
-        if np.all(np.abs(rel_error) <= tolerance):
-            break
-
-        moved_any = False
-        # Most-surplus regions give away pixels first each sweep.
-        for r in np.argsort(rel_error):
-            if rel_error[r] >= -tolerance:
-                continue  # r is at or under target -- nothing to give away
-
-            # A single shared boundary is only one pixel wide, so a plain
-            # "one relabel per sweep" step would need dozens of sweeps to
-            # move any real amount of area. Instead, peel successive
-            # boundary layers between r and its current best deficit
-            # neighbour, re-deriving the boundary and the budget after
-            # each layer, until r's own deficit closes or the two regions
-            # stop touching (r has been fully consumed / boundary reached
-            # the far side). This still can't overshoot: budget_px is
-            # recomputed from the live deficit every layer.
-            inner_guard = 0
-            while rel_error[r] < -tolerance and inner_guard < 2000:
-                inner_guard += 1
-                own_mask = label_grid == r
-                if not own_mask.any():
-                    break
-
-                rows_all, cols_all, nb_all = [], [], []
-                for dr, dc in neighbour_shifts:
-                    nb_grid = _shifted(label_grid, dr, dc)
-                    touch = own_mask & (nb_grid != r) & (nb_grid != -1)
-                    if not touch.any():
-                        continue
-                    rr, cc = np.nonzero(touch)
-                    rows_all.append(rr)
-                    cols_all.append(cc)
-                    nb_all.append(nb_grid[touch])
-
-                if not rows_all:
-                    break
-                rows_all = np.concatenate(rows_all)
-                cols_all = np.concatenate(cols_all)
-                nb_all = np.concatenate(nb_all)
-
-                touching_labels = np.unique(nb_all)
-                deficits = rel_error[touching_labels]
-                best_idx = np.argmax(deficits)
-                best_nb = touching_labels[best_idx]
-                if rel_error[best_nb] <= tolerance:
-                    break  # no genuinely deficit neighbour touches r anymore
-
-                sel = nb_all == best_nb
-                candidate_rows = rows_all[sel]
-                candidate_cols = cols_all[sel]
-
-                # Cap this layer so the transfer doesn't overshoot either
-                # side's target -- recomputed from the CURRENT (live)
-                # deficit, so successive layers automatically shrink as
-                # r's need is satisfied.
-                budget_area = min(
-                    abs(rel_error[r]) * target_areas_arr[r],
-                    abs(rel_error[best_nb]) * target_areas_arr[best_nb],
-                )
-                budget_px = max(1, int(round(budget_area / px_area)))
-                budget_px = min(budget_px, candidate_rows.shape[0])
-
-                chosen_rows = candidate_rows[:budget_px]
-                chosen_cols = candidate_cols[:budget_px]
-                label_grid[chosen_rows, chosen_cols] = best_nb
-
-                moved_px = chosen_rows.shape[0]
-                current_areas[r] -= moved_px * px_area
-                current_areas[best_nb] += moved_px * px_area
-                rel_error = (target_areas_arr - current_areas) / np.maximum(target_areas_arr, 1e-12)
-                moved_any = True
-
-        if not moved_any:
-            break
-
-    # ---- trace region boundaries back out of the corrected raster ---------
-    padded = np.full((label_grid.shape[0] + 2, label_grid.shape[1] + 2), -999, dtype=int)
-    padded[1:-1, 1:-1] = label_grid
-
-    result_polygons = []
-    for r in range(n_regions):
-        mask = (padded == r).astype(float)
-        if not mask.any():
-            result_polygons.append(polys[r].copy())
-            continue
-        contours = find_contours(mask, level=0.5)
-        if not contours:
-            result_polygons.append(polys[r].copy())
-            continue
-        best, best_area = None, -1.0
-        for c in contours:
-            row, col = c[:, 0], c[:, 1]
-            x = xmin + (col - 1 + 0.5) * pixel_size
-            y = ymin + (row - 1 + 0.5) * pixel_size
-            poly_xy = np.column_stack([x, y])
-            area = abs(polygon_areanp(poly_xy))
-            if area > best_area:
-                best_area, best = area, poly_xy
-        if len(best) > 1 and np.allclose(best[0], best[-1]):
-            best = best[:-1]
-        if simplify_tolerance > 0 and len(best) > 3:
-            best = approximate_polygon(best, tolerance=simplify_tolerance)
-            if len(best) > 1 and np.allclose(best[0], best[-1]):
-                best = best[:-1]
-        result_polygons.append(best)
-
-    if return_raster:
-        raster_info = {
-            "label_grid": label_grid,
-            "extent": (xmin, ymin, xmax, ymax),
-            "pixel_size": pixel_size,
-            "final_areas": current_areas,
-        }
-        return result_polygons, raster_info
-
     return result_polygons

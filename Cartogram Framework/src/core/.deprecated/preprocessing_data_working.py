@@ -150,64 +150,6 @@ def preprocess_global(
 
 
 # ---------------------------------------------------------------------------
-# Auto area-scale (non-contiguous safety cap)
-# ---------------------------------------------------------------------------
-
-def auto_area_scale(data, target_areas, cap: float = 1.0) -> float:
-    """
-    Compute the largest-safe `area_scale` multiplier for non-contiguous
-    cartograms.
-
-    A plain non-contiguous cartogram scales each region isotropically
-    around its own fixed centroid, with no shared-vertex coupling to
-    neighbours. If any region's (sum-normalised) target area exceeds its
-    *own* original area, that region grows beyond the footprint its
-    neighbours were originally drawn up against — which is how
-    non-contiguous cartograms end up overlapping.
-
-    `target_areas` must already be the SUM-NORMALISED list (i.e. what
-    `preprocess()` returns), not the raw per-region target_area values —
-    the normalisation step changes every ratio, so computing this before
-    normalisation would give the wrong scale.
-
-    Returns
-    -------
-    float
-        `1.0` if every region's growth ratio is already <= `cap` (no
-        scaling needed). Otherwise `cap / max_ratio`, i.e. the multiplier
-        that brings the single worst-offending region's target area down
-        to exactly `cap` * its own original area, shrinking every other
-        region proportionally less.
-    """
-    region_names = [name for name in data.keys() if name != "__meta__"]
-    if len(region_names) != len(target_areas):
-        raise ValueError(
-            f"auto_area_scale: got {len(target_areas)} target areas for "
-            f"{len(region_names)} regions — pass the normalised list "
-            f"preprocess() produces, in the same region order."
-        )
-
-    max_ratio = 0.0
-    for name, ta in zip(region_names, target_areas):
-        record = data[name]
-        original_area = record.get("area", record.get("original_area"))
-        if original_area is None:
-            polygon = record.get("new_polygon", record.get("polygon"))
-            if polygon is None:
-                raise ValueError(f"Region '{name}' has no area and no polygon to derive one from")
-            original_area = polygon_areanp(np.asarray(polygon, dtype=float))
-        if original_area <= 1e-12:
-            continue  # degenerate region — ignore for scale purposes
-        ratio = ta / original_area
-        if ratio > max_ratio:
-            max_ratio = ratio
-
-    if max_ratio <= cap:
-        return 1.0
-    return cap / max_ratio
-
-
-# ---------------------------------------------------------------------------
 # Leader-line computation (Nickel et al. Lemma 2 — O(n²) sweep)
 # ---------------------------------------------------------------------------
 

@@ -84,13 +84,17 @@ def _detect_column(df: pd.DataFrame, candidates: List[str], kind: str,
 
 
 def _normalize_name(name: str) -> str:
-    """Whitespace/case/accent-insensitive key for fallback matching, e.g.
-    ' Abruzzo ' vs 'Abruzzo', or 'Åland' vs 'Aland'/'ALAND'. Diacritics are
-    stripped via NFKD decomposition, since umlauts/accents differ across
-    your NL/DE/FR datasets between geojson and CSV encodings."""
-    normalized = " ".join(str(name).split()).casefold()
+    """Whitespace/case/punctuation/accent-insensitive key for fallback
+    matching, e.g. ' Abruzzo ' vs 'Abruzzo', 'New Hampshire' vs
+    'NewHampshire', or 'Åland' vs 'Aland'/'ALAND'. Diacritics are stripped
+    via NFKD decomposition, and non-alphanumeric separators are removed so
+    spacing/underscore/hyphen differences collapse to the same key."""
+    normalized = str(name).casefold()
     decomposed = unicodedata.normalize("NFKD", normalized)
-    return "".join(c for c in decomposed if not unicodedata.combining(c))
+    return "".join(
+        c for c in decomposed
+        if not unicodedata.combining(c) and c.isalnum()
+    )
 
 
 def _build_lookup(df: pd.DataFrame, name_col: str, value_col: str) -> dict:

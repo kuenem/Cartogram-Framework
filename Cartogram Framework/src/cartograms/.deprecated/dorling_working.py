@@ -42,23 +42,6 @@ def dorling_cartogram(region, level, year="2016"):
         t_min   = 0.01,
         t_max   = 5.0,
         shape_deformation = 0.0,   # triggers make_circle()
-
-        # ── Anti-overlap (Approach 2) ────────────────────────────────────
-        # horizontal_pairs/vertical_pairs above only cover pairs classified
-        # as predominantly axis-aligned, and even then use a square-style
-        # margin (sqrt(A_i)+sqrt(A_j))/2, which is ~11% short of the exact
-        # r_i+r_j circles need. lambda_repulsion here covers EVERY pair
-        # (including diagonal ones the axis-aligned check misses) with the
-        # exact circle-radius margin via repulsion_margin_mode.
-        lambda_repulsion = 1.0,
-        repulsion_only_adjacent = False,
-        repulsion_margin_mode = "circle_radius",
-
-        # Belt-and-suspenders: lambda_repulsion above handles overlap
-        # inside the convex solve (soft, so not a hard guarantee); this
-        # cleans up whatever's left afterwards by nudging centres apart,
-        # never touching the (already-correct) circle areas.
-        postprocess_declump_circles = True,
     )
 
     return new_data

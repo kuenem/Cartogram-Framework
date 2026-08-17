@@ -211,84 +211,19 @@ def plot_polys(polygons, title="Polygons", plot_points=False, centroids=False, l
     plt.show()
 
 
-def _polygon_min_distance(p1, p2):
-    """Minimum vertex-to-vertex distance between two point sets (numpy only, no shapely)."""
-    diff = p1[:, None, :] - p2[None, :, :]
-    dists = np.sqrt((diff ** 2).sum(axis=2))
-    return dists.min()
-
-
-def _build_adjacency_graph(polygons_list, threshold):
-    """Return {idx: set(neighbor_idx)} for polygons whose min vertex distance <= threshold."""
-    n = len(polygons_list)
-    adj = {i: set() for i in range(n)}
-    for i in range(n):
-        pi = polygons_list[i]
-        if pi.shape[0] == 0:
-            continue
-        for j in range(i + 1, n):
-            pj = polygons_list[j]
-            if pj.shape[0] == 0:
-                continue
-            d = _polygon_min_distance(pi, pj)
-            if d <= threshold:
-                adj[i].add(j)
-                adj[j].add(i)
-    return adj
-
-
-def _greedy_graph_coloring(adj):
-    """Welsh-Powell style greedy coloring: highest-degree nodes first, assign smallest free color index."""
-    order = sorted(adj.keys(), key=lambda k: -len(adj[k]))
-    colors = {}
-    for node in order:
-        used = {colors[nb] for nb in adj[node] if nb in colors}
-        c = 0
-        while c in used:
-            c += 1
-        colors[node] = c
-    return colors
-
-
-def _auto_adjacency_threshold(polygons_list, frac=0.02):
-    """Default proximity threshold: a small fraction of the overall bounding-box diagonal."""
-    all_pts = np.vstack([p for p in polygons_list if p.shape[0] > 0])
-    mins = all_pts.min(axis=0)
-    maxs = all_pts.max(axis=0)
-    diag = np.linalg.norm(maxs - mins)
-    return diag * frac
-
-
-def plot_polys_data(data, title="Polygons", plot_original_outlines=False, plot_points=False, centroids=False, label_vertices=False, legend=True, target_centers=None, names=None, svg=False, new=True, avoid_adjacent_colors=True, adjacency_threshold=None, colormap='tab20'):
+def plot_polys_data(data, title="Polygons", plot_original_outlines=False, plot_points=False, centroids=False, label_vertices=False, legend=True, target_centers=None, names=None, svg=False, new=True):
     
     plt.figure(figsize=[12.8, 9.6])
-
-    # --- collect region names/points first so we can build the adjacency graph up front ---
-    region_names = [name for name in data if name != '__meta__']
-    points_list = []
-    for name in region_names:
+    
+    for idx, name in enumerate(data):
+        if name == '__meta__':
+            continue
+        
         if new and 'new_polygon' in data[name]:
-            pts = np.array(data[name]['new_polygon'])
+            points = np.array(data[name]['new_polygon'])
+            original = np.array(data[name]['polygon'])
         else:
-            pts = np.array(data[name]['polygon'])
-        points_list.append(pts)
-
-    color_for_idx = None
-    if avoid_adjacent_colors:
-        threshold = adjacency_threshold if adjacency_threshold is not None else _auto_adjacency_threshold(points_list)
-        adj = _build_adjacency_graph(points_list, threshold)
-        color_idx = _greedy_graph_coloring(adj)
-        n_colors_needed = max(color_idx.values(), default=0) + 1
-        cmap = plt.get_cmap(colormap)
-        palette_size = cmap.N if hasattr(cmap, 'N') else 20
-        if n_colors_needed > palette_size:
-            print(f"[plot_polys_data] warning: graph coloring needs {n_colors_needed} colors, "
-                  f"but colormap '{colormap}' only has {palette_size}; colors will repeat.")
-        color_for_idx = {i: cmap(color_idx[i] % palette_size) for i in color_idx}
-
-    for idx, name in enumerate(region_names):
-        points = points_list[idx]
-        original = np.array(data[name]['polygon']) if (new and 'new_polygon' in data[name]) else None
+            points = np.array(data[name]['polygon'])
 
         if points.shape[0] == 0:
             print(f"[plot_polys_data] skipping '{name}': 0 vertices")
@@ -296,15 +231,12 @@ def plot_polys_data(data, title="Polygons", plot_original_outlines=False, plot_p
 
         # close polygon
         poly = np.vstack([points, points[0]])
-        original_poly = np.vstack([original, original[0]]) if (plot_original_outlines and original is not None) else None
+        original_poly = np.vstack([original, original[0]]) if plot_original_outlines else None
 
         plt.plot(original_poly[:,0], original_poly[:,1], color='gray', linestyle='--', linewidth=0.1, alpha=0.2, label=f"Original {name}") if plot_original_outlines else None
         
         # filled polygon (slightly transparent so overlaps are visible)
-        fill_kwargs = {"alpha": 0.3, "label": f"Poly {idx}"}
-        if color_for_idx is not None:
-            fill_kwargs["color"] = color_for_idx[idx]
-        plt.fill(poly[:,0], poly[:,1], **fill_kwargs)
+        plt.fill(poly[:,0], poly[:,1], alpha=0.3, label=f"Poly {idx}")
         
         if plot_points:
             # edges

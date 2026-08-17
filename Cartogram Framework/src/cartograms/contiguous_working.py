@@ -33,12 +33,12 @@ def contiguous_cartogram(region, level, year="2016"):
         lambda_area       = 1.0,
         lambda_center     = 0.0,
         lambda_topology   = 0.0,
-        lambda_contiguous = 30.0,
+        lambda_contiguous = 30.0, #80.0
         soft_mean_scale   = True,
-        lambda_mean_scale = 1e5,
+        lambda_mean_scale = 1e4,
         t_min = 0.01,
-        t_max = 98,
-        lambda_vertex_distance = 3.0,
+        t_max = 5.5,
+        lambda_vertex_distance = 5.0, #10
         vertex_distance_margin = 1.5,
         lambda_repulsion  = 0.0,
         contiguous_area_ratio_cap = np.inf,
@@ -63,7 +63,7 @@ def contiguous_cartogram(region, level, year="2016"):
         # Bias disputed/gap pixel assignment toward whichever contesting
         # region is currently furthest under its target area (0 = old
         # pure-proximity behaviour).
-        postprocess_raster_area_bias = 0.05,
+        postprocess_raster_area_bias = 0.15,
         # Final raster area-correction pass: shifts thin boundary strips
         # from area-surplus regions to their area-deficit neighbours
         # directly on the pixel labelling (can't reintroduce gaps/overlaps

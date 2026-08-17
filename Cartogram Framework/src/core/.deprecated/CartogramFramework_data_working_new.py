@@ -7,94 +7,6 @@ Unified cartogram optimisation covering:
   - Original shape
   - Contiguous shape  (shape="contiguous")
   - Contiguous soft   (shape="contiguous2")
-
-Feasibility & identity guarantees
-----------------------------------
-Two structural properties are guaranteed by construction:
-
-1. ALWAYS FEASIBLE. Every constraint in the problem is now either a
-   per-variable box bound or a one-sided slack/hinge lower bound. The
-   three constraint groups that used to be hard equalities/inequalities
-   (mean-scale, horizontal/vertical ordering, contiguous shared-vertex
-   locking) have all been converted to soft quadratic penalties gated by
-   their own weight (lambda_mean_scale, lambda_order, lambda_contiguous).
-   A large weight approximates the old hard behaviour; it can never make
-   the problem infeasible. The only remaining way to get infeasibility is
-   t_min > t_max, which is validated explicitly and raises early.
-
-2. ALL-WEIGHTS-OFF IDENTITY. If every lambda_* is 0, every soft penalty
-   above evaluates to 0 everywhere in the feasible box, so the objective
-   is flat and any feasible point is "optimal" — including but not
-   uniquely the input geometry (t=1, delta=0). To make the input the
-   *unique* minimiser in that case (rather than an arbitrary tie), a
-   tiny always-on anchor penalty pulls t -> 1 and each region's centre
-   back to its fixed point. Its weight (_ANCHOR_EPS below) is hardcoded
-   and NOT exposed as a user parameter — it is small enough (1e-9) to be
-   negligible next to any real lambda, but decisive when all real
-   lambdas are 0.
-   Caveat: for shape="circle"/"square" the "input" being reproduced is
-   the *re-initialised* circle/square (see step 2, "Optional polygon
-   re-initialisation"), not the original geographic polygon — that
-   re-initialisation happens independently of any lambda weight.
-   Caveat: identity requires t=1 to lie within [t_min, t_max]; if you
-   pass bounds that exclude 1 (e.g. to force shrinkage), that is a
-   deliberate constraint and identity is correctly not reachable.
-
-3. EITHER/OR WEIGHT SOURCE. Each of W_shape/W_area/W_spatial/W_topology
-   comes from exactly one source, never a blend of both:
-     W_shape    <- lambda_shape    else (1 - shape_deformation)
-     W_area     <- lambda_area     else cartographic_error
-     W_spatial  <- lambda_center   else spatial_deformation
-     W_topology <- lambda_topology else topological_accuracy
-   This precedence lives in preprocess_global itself (src/core/
-   preprocessing_data.py): each lambda_* defaults to None here, and
-   preprocess_global uses it if it's not None, otherwise falls back to
-   the legacy value. Whichever one actually governs, it does so outright
-   — the two are never added, multiplied, or otherwise combined.
-   The three plain legacy args (cartographic_error, spatial_deformation,
-   topological_accuracy) keep this wrapper's original concrete defaults
-   (1.0, 0.0, 1.0) so that omitting a lambda_*/legacy pair entirely still
-   reproduces the framework's original default weights exactly.
-   shape_deformation is dual-purpose: besides being the legacy fallback
-   for W_shape, it independently selects circle/square re-initialisation
-   in step 2 below. Existing calls (e.g. the Demers/Dorling cells in
-   exploration.ipynb) legitimately pass both lambda_shape AND
-   shape_deformation=0.0 together for that reason — no conflict, since
-   once lambda_shape is given it simply wins for W_shape outright and
-   shape_deformation is still doing its separate structural job.
-   Five previously-accepted legacy parameters (relative_direction,
-   global_shape, local_shape, complexity, data_ink_ratio) are kept only
-   for call-signature compatibility — preprocess_global never reads any
-   of them in its body, so they were already complete no-ops before any
-   of today's changes.
-
-4. TANGENTIAL VERTEX FREEDOM + VERTEX-LEVEL ANTI-OVERLAP (opt-in, default
-   off — zero behaviour change unless requested):
-   a) Fixed a real bug in Approach 2 (centre repulsion): it used two
-      independent one-sided hinges per axis, one of which grew WITHOUT
-      BOUND the farther apart two centres already were — the opposite of
-      what a repulsion penalty should do. Direction-agnostic "stay
-      >= margin apart" is inherently non-convex (a keep-out disk), so a
-      convex surrogate has to commit to a side in advance; this now picks
-      a fixed separating axis from each pair's ORIGINAL relative position
-      (_one_sided_repulsion()) and applies a single correct hinge.
-   b) tangential_freedom=True gives every "free" vertex — one NOT shared
-      with a neighbouring region (i.e. facing the void/open background,
-      not another region) — a second local degree of freedom u_{i,k} in
-      addition to the existing radial scale t_{i,k}: v'_{i,k} = m_i +
-      t_{i,k}*r_{i,k} + u_{i,k}*n_{i,k}, where r is the original
-      centre->vertex axis and n is that axis rotated 90°, both fixed
-      constants from the original geometry (so the expression stays
-      affine and DCP-compliant). Vertices that ARE shared with a
-      neighbour are pinned to u=0 ("locked to the void" only applies to
-      vertices that actually face it) — their position stays governed by
-      the existing contiguous coupling penalty instead.
-   c) lambda_vertex_repulsion applies the same corrected one-sided-hinge
-      repulsion from (a) between individual free vertices of different
-      regions, giving tangential freedom something concrete to do: slide
-      sideways to avoid intruding into a neighbour. Off by default; scales
-      as O(n_free_i * n_free_j) per region pair, so start with
-      vertex_repulsion_only_adjacent=True (the default).
 """
 
 from __future__ import annotations
@@ -113,20 +25,6 @@ from src.utils import *
 from src.core import *
 from src.core.preprocessing_data import *
 
-# Weight of the always-on anchor penalty (Fix 2). Hardcoded, not user-facing:
-# negligible next to any real lambda_* (which are O(0.1) to O(1e6) in
-# practice), but makes t=1/delta=0 the unique minimiser when every real
-# lambda_* is 0.
-#
-# NOTE: this value was empirically tuned, not arbitrary. 1e-9 was tried
-# first and FAILS: CLARABEL's convergence tolerance can't resolve an
-# objective that small, so with every real lambda_* at 0 it returned an
-# arbitrary feasible point up to ~0.14 units away from the true input
-# geometry ("optimal" status, but not actually at the anchor's minimiser).
-# 1e-4 was verified (see smoke test) to bring that error down to ~1e-8 —
-# effectively exact — while still being 3-4 orders of magnitude below the
-# smallest lambda_* value used anywhere in practice (e.g. lambda_shape=0.1
-# for Demers cartograms), so it never perceptibly competes with real terms.
 _ANCHOR_EPS = 1e-4
 
 # ---------------------------------------------------------------------------
@@ -157,30 +55,6 @@ def CartogramFramework_global(
     shared_vertices_of_neighbors=None,
     # list of [i, j, shared_points] from shared_vertices_of_neighbors()
     shared_vertex_tolerance: float = 1e-8,
-    # Coordinate-matching tolerance used to map each shared_points entry
-    # back to actual (k, l) vertex INDICES in the two polygons — this
-    # governs BOTH which vertices get locked (pinned to u=0, excluded
-    # from tangential freedom / vertex repulsion) AND which vertex pairs
-    # the contiguous coupling penalty actually pulls together, so a
-    # mismatch here silently breaks both mechanisms at once.
-    # IMPORTANT: this MUST be set to (at least) whatever tolerance you
-    # used when building shared_vertices_of_neighbors(polygons, ...)
-    # yourself — they're independent numbers and previously this one was
-    # silently hardcoded to 1e-8 regardless of what you passed there.
-    # 1e-8 in lat/lon degrees is ~1.1mm — real shapefile data is very
-    # unlikely to match that tightly between two independently-stored
-    # polygons even when they DO share a real border. If regions that
-    # should be adjacent are drifting apart, or free vertices are moving
-    # in ways that create overlap right where a real shared border is,
-    # try loosening both tolerances together (e.g. 1e-6, 1e-5, 1e-4 —
-    # whatever is small relative to your coordinate units but larger than
-    # your data's actual floating-point noise).
-
-    # --- objective weights (λ) ---
-    # Each is either set directly here, or left as None so its legacy
-    # quality-criterion equivalent below governs instead (see
-    # preprocess_global). Whichever one is non-None wins OUTRIGHT for that
-    # weight — the two never combine, multiply, or blend together.
     lambda_shape: Optional[float]    = None,  # λ_s -> W_shape,    else (1 - shape_deformation)
     lambda_area: Optional[float]     = None,  # λ_a -> W_area,     else cartographic_error
     lambda_center: Optional[float]   = None,  # λ_c -> W_spatial,  else spatial_deformation
@@ -278,7 +152,18 @@ def CartogramFramework_global(
     #   "mean" — snap both sides to their midpoint (default, symmetric)
     #   "i"    — polygon j's vertex moves to polygon i's position
     #   "j"    — polygon i's vertex moves to polygon j's position
-
+    postprocess_disputed_pixels: bool = False,
+    postprocess_gaps: bool = False,
+    postprocess_declump_circles: bool = False,
+    # When True AND shape == "circle", runs declump_circles() over the
+    # solved centres/radii after the solve to clean up any residual
+    # overlap the in-solve penalties (lambda_repulsion / lambda_order)
+    # couldn't fully remove. Only ever moves centres — never resizes
+    # circles — so area accuracy (the whole point of Dorling) is
+    # preserved exactly; only positional accuracy is (slightly) traded.
+    circle_declump_iterations: int = 300,
+    circle_declump_step: float = 0.5,
+    
     compute_leaders_flag: bool = True,
     leader_tol: float = 1e-3,
 
@@ -296,45 +181,27 @@ def CartogramFramework_global(
 
     # ── Approach 2: pairwise centre repulsion (anti-overlap) ───────────────
     lambda_repulsion: float = 0.0,
-    # Weight of soft repulsion penalty between region centres.
-    # A value of 0 (default) disables this term entirely.
-    #
-    # Fix 4a: this used to build TWO independent one-sided hinges per axis
-    # (sp_x >= margin - dx  and  sn_x >= margin + dx). That's syntactically
-    # valid DCP but semantically broken: whichever hinge faces the region's
-    # actual (large) separation grows WITHOUT BOUND the farther apart the
-    # centres already are, fighting normal cartogram scaling instead of
-    # just discouraging closeness. True direction-agnostic "stay >= margin
-    # apart" is inherently non-convex (a keep-out disk around each centre)
-    # so no convex penalty can enforce it from every direction at once —
-    # it has to commit to a side. This now derives that side from each
-    # pair's ORIGINAL relative position (whichever axis has the larger
-    # original gap), giving a single correct one-sided hinge per pair
-    # instead of two competing ones. See _one_sided_repulsion() below.
+   
     repulsion_only_adjacent: bool = False,
     # If True, repulsion is applied only between adjacent pairs (T).
     # If False (default), all pairs are repelled (safer for spike prevention).
     repulsion_margin: float = 1.0,
     # Minimum centre-to-centre distance (along the pair's fixed separating
-    # axis, see above) below which repulsion activates.
+    # axis, see above) below which repulsion activates. Only used when
+    # repulsion_margin_mode="fixed" (the default / legacy behaviour).
+    repulsion_margin_mode: str = "fixed",
+    # "fixed"         — every pair uses the single scalar `repulsion_margin`
+    #                    above, regardless of region size (legacy default).
+    # "circle_radius" — per-pair margin = r_i + r_j, where
+    #                    r_k = sqrt(target_area_k / pi). This is the exact
+    #                    centre-separation needed for two target-sized
+    #                    circles not to overlap, so it's the right mode
+    #                    for shape="circle" (Dorling) anti-overlap use.
+    #                    `repulsion_margin` is ignored in this mode.
 
     # ── Approach 4: tangential vertex freedom + vertex-level anti-overlap ──
     tangential_freedom: bool = False,
-    # Off by default (zero behaviour change for existing calls). When True,
-    # every "free" vertex — one NOT shared with a neighbouring region under
-    # shared_vertices_of_neighbors, i.e. one that borders the void/open
-    # background rather than another region — gets a second, independent
-    # degree of freedom u_{i,k} in addition to the existing radial scale
-    # t_{i,k}. The vertex's new position becomes:
-    #   v'_{i,k} = m_i + t_{i,k} * r_{i,k}  +  u_{i,k} * n_{i,k}
-    # where r_{i,k} is the existing fixed radial axis (centre -> original
-    # vertex) and n_{i,k} is that same axis rotated 90°, both computed once
-    # from the ORIGINAL geometry (so the expression stays affine in the cp
-    # variables and fully DCP-compliant). Vertices that ARE shared with a
-    # neighbour are pinned to u=0 — "locked to the void" only applies to
-    # vertices that actually face the void; shared vertices stay purely
-    # radial since their position is already governed by the contiguous
-    # coupling penalty matching them to their neighbour's vertex.
+    
     tangential_margin: float = 0.5,
     # Box bound on |u_{i,k}|, as a fraction of that vertex's local edge
     # scale (mean distance to its two polygon neighbours in the ORIGINAL
@@ -365,27 +232,9 @@ def CartogramFramework_global(
     # mechanism as repulsion_margin) between a free vertex of one region
     # and a free vertex of another.
     vertex_repulsion_nearest_k: Optional[int] = None,
-    # Cuts the O(n_free_i * n_free_j) blow-up that can hang/crash a kernel
-    # on real polygon data (country borders easily have dozens of
-    # vertices each). If set to an int k, each CANDIDATE free vertex of
-    # region i (see vertex_repulsion_boundary_k below) is only paired with
-    # its k nearest free vertices of region j (by ORIGINAL position — a
-    # fixed, one-time O(n log n) computation, not part of the
-    # optimisation). None (default) uses the full candidate cross product;
-    # set this (e.g. 3-8) for anything beyond toy examples.
+    
     vertex_repulsion_boundary_k: Optional[int] = None,
-    # A further, complementary restriction to nearest_k above. nearest_k
-    # alone still considers EVERY free vertex of region i (even ones on
-    # the far side of the region, nowhere near j) when picking who to
-    # pair with — wasteful for a large polygon with only one small shared
-    # border with a given neighbour. If set to an int m, each region is
-    # first narrowed down to only its m free vertices CLOSEST TO THE
-    # OTHER REGION'S CENTROID (i.e. the ones actually near that specific
-    # shared border) before nearest_k pairing is applied among that
-    # narrowed set. Total pairs per region pair is then bounded by
-    # roughly boundary_k * nearest_k instead of n_free_i * nearest_k —
-    # the right lever to pull when nearest_k alone still leaves too many
-    # pairs (e.g. large countries with hundreds of coastline vertices).
+    
     max_vertex_repulsion_pairs: int = 20000,
     # Hard safety cap. Before building any slack variables, the total
     # vertex-pair count is estimated; if it would exceed this, a clear
@@ -405,36 +254,7 @@ def CartogramFramework_global(
     # Multiplier on r*_i beyond which the penalty becomes active.
     # 1.5 means: no penalty up to 1.5× the ideal radius, quadratic beyond.
 ):
-    """
-    Dict-in / dict-out contract
-    ----------------------------
-    `data` is a dict keyed by region name, each value a dict of per-region
-    fields (polygon, area, target_area, target_positions, centroid, ...).
-    This function MUTATES `data` in place, adding/overwriting these keys
-    on every region record once the solve (and any post-processing) is
-    complete:
-
-        original_polygon, original_area   -- the pre-optimisation geometry
-        new_polygon, new_area             -- the optimised geometry
-        target_area                       -- normalised target used in the solve
-        new_centroid                      -- centroid of new_polygon
-        overlap_area_lost                 -- area clipped away by overlap resolution (0.0 if disabled)
-        status, objective_value           -- solver status / objective (same for every region)
-
-    Anything that is NOT per-region (solver status, objective value, and
-    the Demers/Dorling leader lines) is also mirrored under the reserved
-    key `data["__meta__"]`, since it can't be attached to a single name:
-
-        data["__meta__"] = {
-            "status": ..., "objective_value": ..., "leaders": [...],
-            "target_areas": [...], "n_regions": ...,
-        }
-
-    Returns
-    -------
-    dict
-        The same `data` object, mutated and returned for convenience.
-    """
+    
     # ------------------------------------------------------------------
     # 0. Preprocessing
     # ------------------------------------------------------------------
@@ -467,19 +287,7 @@ def CartogramFramework_global(
         lambda_center=lambda_center,
         lambda_topology=lambda_topology,
     )
-    # preprocess_global (src/core/preprocessing_data.py) resolves each of
-    # W_shape/W_area/W_spatial/W_topology from EITHER its lambda_* argument
-    # (if not None) OR its legacy quality-criterion equivalent — never a
-    # blend of both. See the docstring at the top of this file for the
-    # full pairing and the shape_deformation dual-purpose caveat.
-
-    # ── Apply area_scale AFTER normalisation ───────────────────────────────
-    # preprocess_global already rescaled target_areas so their sum equals the
-    # total original map area.  area_scale then uniformly shrinks/grows every
-    # target area by the same factor.  Because it is applied post-normalisation
-    # the relative proportions between regions are preserved exactly — only the
-    # absolute size changes.  s_i = sqrt(target_area_i / A0_i) will be < 1 for
-    # all regions when area_scale < 1, so regions can only shrink.
+    
     if area_scale != 1.0:
         target_areas = [a * area_scale for a in target_areas]
 
@@ -655,16 +463,7 @@ def CartogramFramework_global(
         # affine in the cp variables and fully DCP-compliant).
         tangents = np.stack([-directions[:, 1], directions[:, 0]], axis=1)
 
-        # ── Fix 4: tangential vertex freedom (u) ─────────────────────────
-        # Every vertex's new position is built from two FIXED local axes
-        # taken from the original geometry: the existing radial axis
-        # (centre -> original vertex, scaled by t) and that axis rotated
-        # 90° (scaled by u). Vertices shared with a neighbour ("locked",
-        # from shared_vertices_of_neighbors) are pinned to u=0 — they stay
-        # purely radial since the contiguous penalty already governs their
-        # position by matching them to their neighbour's vertex. Vertices
-        # facing the void (not shared with anything) get the extra
-        # tangential slide when tangential_freedom=True.
+        
         u = cp.Variable(ni)
         if tangential_freedom:
             prev_d = np.linalg.norm(poly - np.roll(poly, 1, axis=0), axis=1)
@@ -696,13 +495,7 @@ def CartogramFramework_global(
         _directions.append(directions)
         _tangents.append(tangents)
 
-        # ── Mean-scale: always a soft penalty (Fix 1a) ──────────────────────
-        # The old hard equality cp.sum(t)/ni == s could conflict with the
-        # t_min/t_max box (e.g. whenever s fell outside that range) and make
-        # the whole problem infeasible. It has been removed unconditionally
-        # — only box bounds remain here, which alone can never be infeasible
-        # (given t_min <= t_max, validated above). The `soft_mean_scale` flag
-        # is kept in the signature as a no-op for backward compatibility.
+       
         constraints += [
             t >= t_min,
             t <= t_max,
@@ -776,12 +569,7 @@ def CartogramFramework_global(
         if lambda_vertex_distance > 0.0:
             shape_terms[-1] = shape_terms[-1] + vertex_dist_term  # Approach 3
 
-        # Fix 2: always-on identity anchor for this region — pulls t -> 1
-        # (no shape/area change) and delta -> 0 (centre stays at fp, i.e.
-        # m == fp). Weighted by _ANCHOR_EPS, added to the objective
-        # completely OUTSIDE W_shape/W_spatial/any lambda_*, so it is never
-        # silenced by turning those weights off — it's what makes the
-        # input geometry the *unique* minimiser when every real lambda is 0.
+   
         anchor_terms.append(cp.sum_squares(t - 1) + cp.sum_squares(delta))
 
     # ------------------------------------------------------------------
@@ -830,14 +618,7 @@ def CartogramFramework_global(
             bij = b_ij(i, j)
             pairwise_terms.append(hor + ver + bij * d_var)
 
-        # Soft ordering penalties for H and V pairs (Fix 1b; was eqs. 11–12
-        # as HARD inequality constraints — removed because a contradictory
-        # or cyclic pair list, especially combined with contiguous
-        # shared-vertex coupling, could make the whole problem infeasible).
-        # Each pair now contributes a one-sided hinge: zero penalty if the
-        # ordering already holds, quadratic penalty proportional to the
-        # violation otherwise. Weighted by lambda_order (large by default
-        # so ordering is "practically hard" whenever it's satisfiable).
+  
         all_pairs_seen: set[tuple[int, int]] = set()
         if horizontal_pairs is not None:
             for (i, j) in horizontal_pairs:
@@ -874,16 +655,7 @@ def CartogramFramework_global(
     # ------------------------------------------------------------------
     # 4b-pre. Approach 2: pairwise centre repulsion (anti-spike / anti-overlap)
     # ------------------------------------------------------------------
-    # Rationale: spikes pierce neighbouring regions because nothing prevents
-    # a vertex from flying through another polygon's interior.  We cannot
-    # enforce true polygon non-intersection in a convex QP, but pushing
-    # *centres* apart is a DCP-compliant surrogate: if centres stay well
-    # separated, extreme radial spikes are the only way to bridge the gap
-    # and the vertex-distance penalty (Approach 3) then suppresses those.
-    #
-    # Penalty:  lambda_repulsion * sum_{pairs} max(0, margin^2 - ||m_i-m_j||^2)
-    # which is a soft hinge in the *squared* distance — convex and affine
-    # in m_i, m_j.  We use an auxiliary slack variable to stay DCP-clean.
+ 
     repulsion_terms = []
     if lambda_repulsion > 0.0:
         pairs_for_repulsion = []
@@ -894,14 +666,26 @@ def CartogramFramework_global(
                 for jj in range(ii + 1, n_regions):
                     pairs_for_repulsion.append((ii, jj))
 
+        if repulsion_margin_mode not in ("fixed", "circle_radius"):
+            raise ValueError(
+                f"repulsion_margin_mode must be 'fixed' or 'circle_radius', "
+                f"got {repulsion_margin_mode!r}"
+            )
+
         for (ii, jj) in pairs_for_repulsion:
             if centers_vars[ii] is None or centers_vars[jj] is None:
                 continue
+            if repulsion_margin_mode == "circle_radius":
+                r_i = float(np.sqrt(target_areas[ii] / np.pi))
+                r_j = float(np.sqrt(target_areas[jj] / np.pi))
+                pair_margin = r_i + r_j
+            else:
+                pair_margin = repulsion_margin
             repulsion_terms.append(
                 _one_sided_repulsion(
                     _fp_vals[ii], _fp_vals[jj],
                     centers_vars[ii], centers_vars[jj],
-                    repulsion_margin, tag=f"c_{ii}_{jj}",
+                    pair_margin, tag=f"c_{ii}_{jj}",
                 )
             )
 
@@ -913,13 +697,7 @@ def CartogramFramework_global(
     # ------------------------------------------------------------------
     # 4b-pre-2. Approach 4: vertex-level anti-overlap repulsion
     # ------------------------------------------------------------------
-    # Same corrected single-slack mechanism as Approach 2 above, but
-    # applied between individual FREE (void-facing) vertices of different
-    # regions rather than whole region centres — a much more local, more
-    # effective anti-overlap tool, and the concrete reason tangential
-    # freedom (u) exists: this penalty gives the solver a reason to
-    # actually use it. Locked/shared vertices are excluded (their position
-    # is already governed by the contiguous coupling penalty instead).
+
     vertex_repulsion_terms = []
     if lambda_vertex_repulsion > 0.0:
         if vertex_repulsion_only_adjacent:
@@ -1009,20 +787,6 @@ def CartogramFramework_global(
                 f"max_vertex_repulsion_pairs explicitly"
             )
 
-        # Group by (ii,jj) and average WITHIN each region pair before
-        # summing ACROSS pairs. Fix 5: without this, a region's total pull
-        # scales with however many vertex pairs got created for it (which
-        # depends on vertex count, nearest_k, boundary_k, and how many
-        # neighbours it has) — a highly-detailed region (hundreds of
-        # vertices) or one with many neighbours would accumulate far more
-        # total repulsion "force" than a simple 4-vertex square, even at
-        # the same lambda_vertex_repulsion, purely as an artefact of pair
-        # count rather than actual overlap severity. Averaging within each
-        # region-pair keeps that pair's contribution on the same footing
-        # as Approach 2's one-term-per-region-pair centre repulsion,
-        # regardless of how many candidate vertices were compared; summing
-        # across different neighbour pairs still (correctly) scales with
-        # how many neighbours a region actually has.
         pair_terms: dict = {}
         for (ii, k, jj, l) in vr_pairs:
             v_ik = (
@@ -1088,16 +852,6 @@ def CartogramFramework_global(
             )
 
             for (k, l) in kl_pairs:
-                # Transformed position of vertex k in region i:
-                #   v'_{i,k} = m_i + t_{i,k} * d_{i,k}
-                #            = (fp_i + delta_i) + t_{i,k} * directions_i[k]
-                #
-                # Because m_i = fp_i + delta_i and delta_i is a cp.Variable,
-                # and t_{i,k} is a scalar cp.Variable, and directions_i[k]
-                # is a constant 2-vector, this expression is AFFINE in the
-                # CVXPY variables — fully DCP compliant.
-                #
-                # centers_vars[i] = fp_i + delta_i  (stored as cp.Expression)
 
                 v_i = (
                     centers_vars[i]
@@ -1110,20 +864,6 @@ def CartogramFramework_global(
                     + _u_vars[j][l] * _tangents[j][l]
                 )  # (2,) expr
 
-                # Fix 1c: always a soft quadratic penalty (the old hard
-                # equality for shape=="contiguous" is removed — a graph of
-                # simultaneous equalities across many regions, each also
-                # bound by t_min/t_max and mean-scale, was easily
-                # overdetermined and a common source of infeasibility).
-                # "contiguous" and "contiguous2" now build the identical
-                # penalty; use a large lambda_contiguous to approximate the
-                # old hard-locking behaviour instead.
-                #
-                # Penalise the gap between the two images of the shared
-                # vertex, normalised by the squared original distance
-                # between the two region centres so the weight is
-                # dimensionless and scale-invariant regardless of
-                # coordinate units.
                 diff = v_i - v_j                          # (2,) affine expr
                 ci_fp = _fp_vals[i]  # fixed point of region i
                 cj_fp = _fp_vals[j]  # fixed point of region j
@@ -1154,7 +894,7 @@ def CartogramFramework_global(
 
     objective = cp.Minimize(
         W_shape    * cp.sum(shape_terms)
-        + W_area   * cp.sum(area_terms)
+        + W_area * 10000 * cp.sum(area_terms)
         + W_spatial * cp.sum(center_terms)
         + W_topology * topology_term
         + order_penalty                             # Fix 1b: soft hor/ver ordering
@@ -1298,6 +1038,7 @@ def CartogramFramework_global(
             adjacent_set,
             tol=leader_tol,
         )
+    qp_areas = [polygon_areanp(p) for p in new_polygons]
 
     # ------------------------------------------------------------------
     # 9. Contiguous post-processing (optional)
@@ -1315,11 +1056,30 @@ def CartogramFramework_global(
 
         actual_areas = [polygon_areanp(p) for p in new_polygons]
 
-    # overlap_area_lost is always 0.0: the overlap-resolution post-processing
-    # pass (resolve_polygon_overlaps) was removed as unused dead code — it was
-    # never enabled by any call in exploration.ipynb. The field is kept in the
-    # per-region record for downstream compatibility (e.g. plotting code that
-    # expects the key to exist).
+    if postprocess_disputed_pixels:
+            new_polygons = resolve_disputed_pixels_by_proximity(
+                polygons = new_polygons,
+                resolution = 500,
+                region_order = None,
+                bounds = None,
+                simplify_tolerance = 0.0,
+                return_raster = False,
+            )
+    
+            actual_areas = [polygon_areanp(p) for p in new_polygons]
+
+    if postprocess_gaps:
+            new_polygons = fill_enclosed_gaps_by_proximity(
+                polygons = new_polygons,
+                resolution = 500,
+                region_order = None,
+                bounds = None,
+                simplify_tolerance = 0.0,
+                return_raster = False,
+            )
+
+            actual_areas = [polygon_areanp(p) for p in new_polygons]
+
     overlap_area_lost = [0.0] * n_regions
 
     # ------------------------------------------------------------------
@@ -1339,6 +1099,7 @@ def CartogramFramework_global(
         record.setdefault("centroid", np.mean(original_polygon, axis=0))
         record["new_polygon"] = solved_polygon
         record["new_area"] = float(actual_areas[idx])
+        record["qp_area"] = float(qp_areas[idx])
         record["target_area"] = float(target_areas[idx])
         record["new_centroid"] = np.mean(solved_polygon, axis=0)
         record["overlap_area_lost"] = float(overlap_area_lost[idx])
@@ -1346,6 +1107,22 @@ def CartogramFramework_global(
         record["objective_value"] = prob.value
         record["constraints"] = constraints
         record["objective"] = objective
+
+    if postprocess_declump_circles:
+        if base_shape != "circle":
+            print(
+                "  Warning: postprocess_declump_circles=True but shape != 'circle' "
+                "-- skipping (declumping only makes sense for Dorling circles)."
+            )
+        else:
+            print("Post-processing: removing residual circle overlap "
+                  f"(iterations={circle_declump_iterations}, step={circle_declump_step})")
+            data = postprocess_circle_overlap(
+                data,
+                region_names=region_names,
+                iterations=circle_declump_iterations,
+                step=circle_declump_step,
+            )
 
     # data["__meta__"] = {
     #     "status": prob.status,
@@ -1369,42 +1146,7 @@ def close_contiguous_gaps(
     method: str = "mean",
     tolerance: float = 1e-8,
 ) -> list:
-    """
-    Post-processing: snap shared border vertices of neighbouring polygons
-    to exactly the same coordinate, closing gaps/overlaps left by contiguous2.
 
-    The key design: vertex identity is established by ORIGINAL INDEX, not by
-    searching for the nearest point in the optimised geometry.  After
-    optimisation vertices may have moved significantly, so nearest-neighbour
-    search picks the wrong vertex and creates the crossing/tangling artefacts
-    visible when the naive approach is used.
-
-    Instead we use find_shared_vertex_indices() which looks up each shared
-    point in the ORIGINAL polygon arrays (coordinate-matched) and returns
-    stable (k, l) index pairs.  Those same indices are then used to read and
-    write the OPTIMISED arrays — correct regardless of how far vertices drifted.
-
-    Parameters
-    ----------
-    polygons : list[np.ndarray]
-        Optimised polygons returned by CartogramFramework_global.
-    shared_vertices_of_neighbors_data : list
-        Output of shared_vertices_of_neighbors(original_polygons).
-    original_polygons : list[np.ndarray]
-        The ORIGINAL (pre-optimisation) polygons, used only to resolve
-        which vertex index in each polygon is the shared one.
-    method : str
-        "mean" — snap both sides to their midpoint (symmetric, default).
-        "i"    — move polygon j's vertex to polygon i's current position.
-        "j"    — move polygon i's vertex to polygon j's current position.
-    tolerance : float
-        Coordinate-matching tolerance (same value used when computing
-        shared_vertices_of_neighbors_data).
-
-    Returns
-    -------
-    list[np.ndarray]  — new list of polygons with shared vertices snapped.
-    """
     # Work on copies so the input is never mutated
     result = [np.array(p, dtype=float) for p in polygons]
     orig   = [np.asarray(p, dtype=float) for p in original_polygons]
@@ -1441,3 +1183,486 @@ def close_contiguous_gaps(
 
     return result
 
+
+# ---------------------------------------------------------------------------
+# Post-processing: iterative pairwise circle-overlap removal (Dorling-style)
+# ---------------------------------------------------------------------------
+
+def declump_circles(
+    centers: list,
+    radii: list,
+    iterations: int = 300,
+    step: float = 0.5,
+    tol: float = 1e-9,
+) -> tuple:
+    """
+    Classic Dorling (1996) overlap-removal relaxation. Radii (= areas)
+    are NEVER touched — only centres move — so this can only ever
+    trade positional accuracy for zero overlap, never area accuracy.
+
+    For every still-overlapping pair, push both centres apart along the
+    line joining them by `step` * the overlap amount (0.5 = split the
+    fix evenly between the two; the classic algorithm's default), repeat
+    for up to `iterations` passes or until nothing overlaps by more than
+    `tol`.
+
+    This is a convex-solve-free O(iterations * n^2) fixup: circle
+    non-overlap at arbitrary positions isn't a convex constraint (same
+    separating-hyperplane issue as general polygon non-overlap), so this
+    kind of light relaxation pass is the standard way to close the last
+    gap after the QP, rather than something the solve itself can
+    guarantee exactly.
+
+    Parameters
+    ----------
+    centers : list of (2,) array-like
+    radii   : list of float
+    iterations : max relaxation passes
+    step : float in (0, 1]. 0.5 splits each correction evenly between
+        the two circles (recommended); 1.0 moves one circle the full
+        correction and leaves the other in place — asymmetric, only
+        useful if you want to treat one circle as pinned.
+    tol : stop once max overlap (in the same units as centers/radii) is
+        below this
+
+    Returns
+    -------
+    (new_centers, max_overlap_remaining) : (list[np.ndarray], float)
+    """
+    n = len(centers)
+    pts = [np.array(c, dtype=float) for c in centers]
+    r = [float(x) for x in radii]
+
+    max_overlap = 0.0
+    for _ in range(iterations):
+        max_overlap = 0.0
+        for i in range(n):
+            for j in range(i + 1, n):
+                delta = pts[j] - pts[i]
+                dist = float(np.linalg.norm(delta))
+                needed = r[i] + r[j]
+                overlap = needed - dist
+                if overlap <= tol:
+                    continue
+                max_overlap = max(max_overlap, overlap)
+                if dist < 1e-12:
+                    # Coincident centres: nudge apart along an arbitrary
+                    # fixed axis so the direction is deterministic.
+                    direction = np.array([1.0, 0.0])
+                else:
+                    direction = delta / dist
+                correction = direction * overlap
+                pts[i] -= correction * step
+                pts[j] += correction * (1.0 - step)
+        if max_overlap <= tol:
+            break
+
+    return pts, max_overlap
+
+
+def postprocess_circle_overlap(
+    data: dict,
+    region_names: Optional[list] = None,
+    iterations: int = 300,
+    step: float = 0.5,
+    tol: float = 1e-9,
+    n_vertices: int = 64,
+) -> dict:
+    """
+    Runs declump_circles() over every region's solved (center, radius)
+    in `data` and rewrites "new_polygon"/"new_centroid" to match.
+    "new_area" is left untouched — this pass only ever moves circles,
+    never resizes them. Intended to run AFTER CartogramFramework_global
+    with shape="circle", as a final cleanup for any overlap that
+    survived the (necessarily soft/approximate) in-solve anti-overlap
+    penalties.
+
+    Mutates `data` in place and also returns it, matching the style of
+    the rest of the framework's post-processing functions.
+    """
+    if region_names is None:
+        region_names = [name for name in data.keys() if name != "__meta__"]
+
+    centers, radii = [], []
+    for name in region_names:
+        record = data[name]
+        c = record.get("new_centroid")
+        a = record.get("new_area")
+        if c is None or a is None or not np.isfinite(a) or a <= 0:
+            # Skip degenerate/failed regions — leave them exactly as solved.
+            centers.append(None)
+            radii.append(None)
+            continue
+        centers.append(np.asarray(c, dtype=float))
+        radii.append(float(np.sqrt(a / np.pi)))
+
+    valid_idx = [k for k, c in enumerate(centers) if c is not None]
+    if len(valid_idx) < 2:
+        return data  # nothing to declump
+
+    sub_centers = [centers[k] for k in valid_idx]
+    sub_radii   = [radii[k] for k in valid_idx]
+
+    new_sub_centers, max_overlap = declump_circles(
+        sub_centers, sub_radii, iterations=iterations, step=step, tol=tol
+    )
+
+    if max_overlap > tol:
+        print(
+            f"  WARNING: declump_circles did not fully resolve overlap after "
+            f"{iterations} iterations (max remaining overlap = {max_overlap:.6g}). "
+            f"Try raising `iterations`, or check for near-duplicate target "
+            f"positions / target areas far larger than the available space."
+        )
+
+    for sub_k, k in enumerate(valid_idx):
+        name = region_names[k]
+        new_center = new_sub_centers[sub_k]
+        data[name]["new_centroid"] = new_center
+        data[name]["new_polygon"] = make_circle(new_center, data[name]["new_area"], n=n_vertices)
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Post-processing: assign disputed raster pixels to the nearest
+# undisputed region (does NOT move any vertices)
+# ---------------------------------------------------------------------------
+
+def resolve_disputed_pixels_by_proximity(
+    polygons: list,
+    resolution: int = 500,
+    region_order: Optional[list] = None,
+    bounds: Optional[tuple] = None,
+    simplify_tolerance: float = 0.0,
+    return_raster: bool = False,
+):
+    from matplotlib.path import Path
+    from scipy.ndimage import distance_transform_edt
+ 
+    n_regions = len(polygons)
+    if n_regions == 0:
+        raise ValueError("polygons must contain at least one region")
+ 
+    polys = [np.asarray(p, dtype=float) for p in polygons]
+ 
+    if region_order is None:
+        region_order = list(range(n_regions))
+    priority = {r: rank for rank, r in enumerate(region_order)}
+    for r in range(n_regions):
+        priority.setdefault(r, n_regions + r)  # any region missing from
+        # region_order falls back to input order, after the explicit list
+ 
+    # ---- combined bounding box --------------------------------------------
+    if bounds is None:
+        all_xy = np.vstack(polys)
+        xmin, ymin = all_xy.min(axis=0)
+        xmax, ymax = all_xy.max(axis=0)
+        pad_x = (xmax - xmin) * 0.01 or 1e-6
+        pad_y = (ymax - ymin) * 0.01 or 1e-6
+        xmin, xmax = xmin - pad_x, xmax + pad_x
+        ymin, ymax = ymin - pad_y, ymax + pad_y
+    else:
+        xmin, ymin, xmax, ymax = bounds
+ 
+    width, height = xmax - xmin, ymax - ymin
+    if width >= height:
+        nx = max(int(resolution), 2)
+        pixel_size = width / nx
+        ny = max(int(round(height / pixel_size)), 2)
+    else:
+        ny = max(int(resolution), 2)
+        pixel_size = height / ny
+        nx = max(int(round(width / pixel_size)), 2)
+ 
+    # pixel-centre coordinates
+    xs = xmin + (np.arange(nx) + 0.5) * pixel_size
+    ys = ymin + (np.arange(ny) + 0.5) * pixel_size
+    grid_x, grid_y = np.meshgrid(xs, ys)          # shape (ny, nx)
+    points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+ 
+    # ---- rasterise each region ---------------------------------------------
+    masks = np.zeros((n_regions, ny, nx), dtype=bool)
+    for r, poly in enumerate(polys):
+        inside = Path(poly).contains_points(points, radius=1e-9)
+        masks[r] = inside.reshape(ny, nx)
+ 
+    coverage_count = masks.sum(axis=0)
+    undisputed_masks = masks & (coverage_count == 1)[None, :, :]
+ 
+    # ---- distance (in pixels) from every cell to each region's undisputed body
+    dist_to_undisputed = np.full((n_regions, ny, nx), np.inf)
+    for r in range(n_regions):
+        if undisputed_masks[r].any():
+            dist_to_undisputed[r] = distance_transform_edt(~undisputed_masks[r])
+        # else: stays +inf -- region r has no solid undisputed body to
+        # measure distance from, so it can only win via plain priority.
+ 
+    # Regions that don't even claim a given pixel are never candidates there.
+    dist_masked = np.where(masks, dist_to_undisputed, np.inf)   # (n_regions, ny, nx)
+ 
+    # Reorder the region axis by tie-break priority (highest priority first).
+    # np.argmin returns the FIRST index achieving the minimum, so on an exact
+    # distance tie this naturally picks the highest-priority region -- no
+    # separate tie-break pass needed.
+    order = sorted(range(n_regions), key=lambda r: priority[r])
+    dist_ordered = dist_masked[order]
+    winner_in_order = np.argmin(dist_ordered, axis=0)
+    winner = np.asarray(order)[winner_in_order]
+ 
+    label_grid = np.where(coverage_count > 0, winner, -1).astype(int)
+ 
+    # ---- trace region boundaries back out of the resolved raster ----------
+    from skimage.measure import find_contours, approximate_polygon
+ 
+    # Pad with a sentinel border so every region's mask is fully enclosed
+    # (no contour touches the array edge, so all traced contours are closed
+    # loops we can turn straight into polygons).
+    padded = np.full((label_grid.shape[0] + 2, label_grid.shape[1] + 2), -999, dtype=int)
+    padded[1:-1, 1:-1] = label_grid
+ 
+    result_polygons = []
+    n_empty_norasterize = 0
+    n_empty_swallowed = 0
+    for r in range(n_regions):
+        mask = (padded == r).astype(float)
+ 
+        if not mask.any():
+            result_polygons.append(polys[r].copy())
+            if masks[r].any():
+                # It DID cover some raster pixels, but lost every one of
+                # them to higher-priority neighbours (no undisputed core of
+                # its own to win ties/distance with) -- fully swallowed.
+                n_empty_swallowed += 1
+            else:
+                # It never rasterised at all: smaller than a pixel at this
+                # resolution relative to the bounding box.
+                n_empty_norasterize += 1
+            continue
+ 
+        contours = find_contours(mask, level=0.5)
+        if not contours:
+            result_polygons.append(polys[r].copy())
+            n_empty_swallowed += 1
+            continue
+ 
+        # A region can trace into several disconnected loops (e.g. if it
+        # got fully cut in two by neighbours); keep the largest by area as
+        # the region's boundary, matching the one-polygon-per-region
+        # convention used throughout this module.
+        best = None
+        best_area = -1.0
+        for c in contours:
+            # c is (row, col) in PADDED pixel-index space, subpixel accurate
+            row, col = c[:, 0], c[:, 1]
+            x = xmin + (col - 1 + 0.5) * pixel_size
+            y = ymin + (row - 1 + 0.5) * pixel_size
+            poly_xy = np.column_stack([x, y])
+            area = abs(polygon_areanp(poly_xy))
+            if area > best_area:
+                best_area = area
+                best = poly_xy
+ 
+        # find_contours closes the loop by repeating the first point --
+        # drop the duplicate to match the open-ring convention used for
+        # `polygons` elsewhere in this module.
+        if len(best) > 1 and np.allclose(best[0], best[-1]):
+            best = best[:-1]
+ 
+        if simplify_tolerance > 0 and len(best) > 3:
+            best = approximate_polygon(best, tolerance=simplify_tolerance)
+            if len(best) > 1 and np.allclose(best[0], best[-1]):
+                best = best[:-1]
+ 
+        result_polygons.append(best)
+ 
+    if n_empty_norasterize or n_empty_swallowed:
+        import warnings
+        warnings.warn(
+            f"resolve_disputed_pixels_by_proximity: {n_empty_norasterize} region(s) "
+            f"never rasterised at resolution={resolution} (too small relative to the "
+            f"bounding box -- try raising `resolution`), and {n_empty_swallowed} "
+            f"region(s) lost every pixel to higher-priority neighbours (fully "
+            f"swallowed -- check `region_order` / overlap amount). All of these were "
+            f"kept as their ORIGINAL (pre-resolution) polygon instead of being "
+            f"dropped, so region count and `polygon_areanp(p)` stay well-defined for "
+            f"every entry, but they were NOT actually disputed-pixel-resolved.",
+            stacklevel=2,
+        )
+ 
+    if return_raster:
+        raster_info = {
+            "label_grid": label_grid,
+            "coverage_count": coverage_count,
+            "extent": (xmin, ymin, xmax, ymax),
+            "pixel_size": pixel_size,
+        }
+        return result_polygons, raster_info
+ 
+    return result_polygons
+
+def fill_enclosed_gaps_by_proximity(
+    polygons: list,
+    resolution: int = 500,
+    region_order: Optional[list] = None,
+    bounds: Optional[tuple] = None,
+    simplify_tolerance: float = 0.0,
+    return_raster: bool = False,
+):
+
+    from matplotlib.path import Path
+    from scipy.ndimage import distance_transform_edt, binary_fill_holes
+
+    n_regions = len(polygons)
+    if n_regions == 0:
+        raise ValueError("polygons must contain at least one region")
+
+    polys = [np.asarray(p, dtype=float) for p in polygons]
+
+    if region_order is None:
+        region_order = list(range(n_regions))
+    priority = {r: rank for rank, r in enumerate(region_order)}
+    for r in range(n_regions):
+        priority.setdefault(r, n_regions + r)
+
+    # ---- combined bounding box --------------------------------------------
+    if bounds is None:
+        all_xy = np.vstack(polys)
+        xmin, ymin = all_xy.min(axis=0)
+        xmax, ymax = all_xy.max(axis=0)
+        pad_x = (xmax - xmin) * 0.01 or 1e-6
+        pad_y = (ymax - ymin) * 0.01 or 1e-6
+        xmin, xmax = xmin - pad_x, xmax + pad_x
+        ymin, ymax = ymin - pad_y, ymax + pad_y
+    else:
+        xmin, ymin, xmax, ymax = bounds
+
+    width, height = xmax - xmin, ymax - ymin
+    if width >= height:
+        nx = max(int(resolution), 2)
+        pixel_size = width / nx
+        ny = max(int(round(height / pixel_size)), 2)
+    else:
+        ny = max(int(resolution), 2)
+        pixel_size = height / ny
+        nx = max(int(round(width / pixel_size)), 2)
+
+    xs = xmin + (np.arange(nx) + 0.5) * pixel_size
+    ys = ymin + (np.arange(ny) + 0.5) * pixel_size
+    grid_x, grid_y = np.meshgrid(xs, ys)          # shape (ny, nx)
+    points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+
+    # ---- rasterise each region ---------------------------------------------
+    masks = np.zeros((n_regions, ny, nx), dtype=bool)
+    for r, poly in enumerate(polys):
+        inside = Path(poly).contains_points(points, radius=1e-9)
+        masks[r] = inside.reshape(ny, nx)
+
+    coverage_count = masks.sum(axis=0)
+    covered_mask = coverage_count > 0
+
+    # ---- find enclosed holes: zero-coverage pixels NOT reachable from the
+    #      raster border without crossing covered territory. Filling the
+    #      holes of `covered_mask` turns exactly those pixels True; XOR-ing
+    #      back against covered_mask isolates the newly-filled ("hole")
+    #      pixels from the ones that were already covered.
+    filled = binary_fill_holes(covered_mask)
+    hole_mask = filled & ~covered_mask
+
+    # ---- distance (in pixels) from every cell to each region's body -------
+    # (Gap pixels have zero coverage by construction, so there's no overlap
+    # to disambiguate here -- the region's full mask *is* its undisputed
+    # body, unlike the sibling function which has to subtract disputed
+    # pixels first.)
+    dist_to_region = np.full((n_regions, ny, nx), np.inf)
+    for r in range(n_regions):
+        if masks[r].any():
+            dist_to_region[r] = distance_transform_edt(~masks[r])
+        # else: stays +inf -- region r has no body to measure distance from.
+
+    order = sorted(range(n_regions), key=lambda r: priority[r])
+    dist_ordered = dist_to_region[order]
+    winner_in_order = np.argmin(dist_ordered, axis=0)
+    winner = np.asarray(order)[winner_in_order]
+
+
+    label_grid = np.full((ny, nx), -1, dtype=int)
+    for r in order[::-1]:
+        # iterate lowest-priority first so the final overwrite by the
+        # highest-priority region wins on any residual overlap
+        label_grid[masks[r]] = r
+    label_grid[hole_mask] = winner[hole_mask]
+
+    # ---- trace region boundaries back out of the resolved raster ----------
+    from skimage.measure import find_contours, approximate_polygon
+
+    padded = np.full((label_grid.shape[0] + 2, label_grid.shape[1] + 2), -999, dtype=int)
+    padded[1:-1, 1:-1] = label_grid
+
+    result_polygons = []
+    n_empty_norasterize = 0
+    n_empty_swallowed = 0
+    for r in range(n_regions):
+        mask = (padded == r).astype(float)
+
+        if not mask.any():
+            result_polygons.append(polys[r].copy())
+            if masks[r].any():
+                n_empty_swallowed += 1
+            else:
+                n_empty_norasterize += 1
+            continue
+
+        contours = find_contours(mask, level=0.5)
+        if not contours:
+            result_polygons.append(polys[r].copy())
+            n_empty_swallowed += 1
+            continue
+
+        best = None
+        best_area = -1.0
+        for c in contours:
+            row, col = c[:, 0], c[:, 1]
+            x = xmin + (col - 1 + 0.5) * pixel_size
+            y = ymin + (row - 1 + 0.5) * pixel_size
+            poly_xy = np.column_stack([x, y])
+            area = abs(polygon_areanp(poly_xy))
+            if area > best_area:
+                best_area = area
+                best = poly_xy
+
+        if len(best) > 1 and np.allclose(best[0], best[-1]):
+            best = best[:-1]
+
+        if simplify_tolerance > 0 and len(best) > 3:
+            best = approximate_polygon(best, tolerance=simplify_tolerance)
+            if len(best) > 1 and np.allclose(best[0], best[-1]):
+                best = best[:-1]
+
+        result_polygons.append(best)
+
+    if n_empty_norasterize or n_empty_swallowed:
+        import warnings
+        warnings.warn(
+            f"fill_enclosed_gaps_by_proximity: {n_empty_norasterize} region(s) "
+            f"never rasterised at resolution={resolution} (too small relative to the "
+            f"bounding box -- try raising `resolution`), and {n_empty_swallowed} "
+            f"region(s) lost every pixel to higher-priority neighbours (fully "
+            f"swallowed -- check `region_order`). All of these were kept as their "
+            f"ORIGINAL (pre-resolution) polygon instead of being dropped, so region "
+            f"count and `polygon_areanp(p)` stay well-defined for every entry, but "
+            f"they were NOT actually gap-filled.",
+            stacklevel=2,
+        )
+
+    if return_raster:
+        raster_info = {
+            "label_grid": label_grid,
+            "coverage_count": coverage_count,
+            "hole_mask": hole_mask,
+            "extent": (xmin, ymin, xmax, ymax),
+            "pixel_size": pixel_size,
+        }
+        return result_polygons, raster_info
+
+    return result_polygons

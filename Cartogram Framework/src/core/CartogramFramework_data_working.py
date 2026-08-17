@@ -1507,15 +1507,6 @@ def resolve_disputed_pixels_by_proximity(
                 (target_areas_arr - current_areas_arr) / target_areas_arr,
                 0.0,
             )
-        # Clamp: a region that's catastrophically off target in the QP
-        # (rel_deficit near +-1, or worse for a region that ballooned past
-        # its own target) must NOT get an unbounded pixel-distance head
-        # start -- that lets one badly-solved region hijack disputed/gap
-        # pixels across the whole map regardless of true proximity. Capping
-        # the deficit before scaling means the bias can still decide close
-        # contests in favour of the neediest region, but can never fully
-        # override real geometric distance the way an uncapped bias could.
-        rel_deficit = np.clip(rel_deficit, -0.4, 0.4)
         grid_scale = max(nx, ny)
         bias = area_bias_strength * rel_deficit * grid_scale  # (n_regions,) pixel units
         dist_masked = dist_masked - bias[:, None, None]
@@ -1730,15 +1721,6 @@ def fill_enclosed_gaps_by_proximity(
                 (target_areas_arr - current_areas_arr) / target_areas_arr,
                 0.0,
             )
-        # Clamp: a region that's catastrophically off target in the QP
-        # (rel_deficit near +-1, or worse for a region that ballooned past
-        # its own target) must NOT get an unbounded pixel-distance head
-        # start -- that lets one badly-solved region hijack disputed/gap
-        # pixels across the whole map regardless of true proximity. Capping
-        # the deficit before scaling means the bias can still decide close
-        # contests in favour of the neediest region, but can never fully
-        # override real geometric distance the way an uncapped bias could.
-        rel_deficit = np.clip(rel_deficit, -0.4, 0.4)
         grid_scale = max(nx, ny)
         bias = area_bias_strength * rel_deficit * grid_scale
         dist_to_region = dist_to_region - bias[:, None, None]
