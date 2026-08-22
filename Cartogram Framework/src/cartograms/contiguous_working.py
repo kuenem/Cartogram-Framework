@@ -50,8 +50,6 @@ def contiguous_cartogram(region, level, year="2016"):
         b       = 1e-2,
 
         # ── Post-processing ───────────────────────────────────────────
-        postprocess_contiguous  = False,     # flip to False to skip entirely
-        postprocess_snap_method = "mean",   # midpoint snap on shared vertices
         postprocess_disputed_pixels = True,
         postprocess_gaps = True,
         # Raster resolution shared by disputed-pixel resolution, gap

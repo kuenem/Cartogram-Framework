@@ -11,66 +11,116 @@ from src.viz import *
 from src.core import *
 from src.tests import *
 
-def contiguous_cartogram(region, level, year="2016"):
+def contiguous_cartogram(region, level, year="2016", postprocess=False):
     data, polygons, target_areas, target_positions, names, centroid = loader(region, level, year=year)
     region_names = [k for k in data if k != "__meta__"]
     polygons = []
     polygons = [np.asarray(data[name]["polygon"]) for name in region_names]
 
     horizontal_pairs, vertical_pairs = disjoint_pairs_horizontal_and_vertical_center(polygons)
+    if postprocess:
+        new_data = CartogramFramework_global(
+                data        = data,
+                fixed_points    = None,
+                shape           = "contiguous2",
+                target_centers  = target_positions,
+                horizontal_pairs = horizontal_pairs,
+                vertical_pairs   = vertical_pairs,
+                neighboring_pairs = neighbouring_pairs(polygons),
+                shared_vertices_of_neighbors = shared_vertices_of_neighbors(polygons),
+        
+                lambda_shape      = 0.5,
+                lambda_area       = 1.0,
+                lambda_center     = 0.0,
+                lambda_topology   = 0.0,
+                lambda_contiguous = 30.0,
+                soft_mean_scale   = True,
+                lambda_mean_scale = 1e5,
+                t_min = 0.01,
+                t_max = 98,
+                lambda_vertex_distance = 3.0,
+                vertex_distance_margin = 1.5,
+                lambda_repulsion  = 0.0,
+                contiguous_area_ratio_cap = np.inf,
+                contiguous_use_topology   = False,
+                gamma = 1.0,
+                beta  = 1.0,
+                alpha = 1.0,
+                epsilon = 1e-2,
+                b       = 1e-2,
+        
+                # ── Post-processing ───────────────────────────────────────────
+                postprocess_disputed_pixels = True,
+                postprocess_gaps = True,
+                # Raster resolution shared by disputed-pixel resolution, gap
+                # filling, and the final equalize pass below. 500 is coarse for
+                # ~50 states of very different sizes (small states get very few
+                # pixels) -- raise this if you still see large area errors on the
+                # smallest regions.
+                postprocess_raster_resolution = 800,
+                # Bias disputed/gap pixel assignment toward whichever contesting
+                # region is currently furthest under its target area (0 = old
+                # pure-proximity behaviour).
+                postprocess_raster_area_bias = 0.05,
+                # Final raster area-correction pass: shifts thin boundary strips
+                # from area-surplus regions to their area-deficit neighbours
+                # directly on the pixel labelling (can't reintroduce gaps/overlaps
+                # the way an independent per-region rescale could).
+                postprocess_equalize_areas = True,
+                postprocess_equalize_max_passes = 30,
+                postprocess_equalize_tolerance = 0.02,
+            )
+    else:
+        new_data = CartogramFramework_global(
+            data        = data,
+            fixed_points    = None,
+            shape           = "contiguous2",
+            target_centers  = target_positions,
+            horizontal_pairs = horizontal_pairs,
+            vertical_pairs   = vertical_pairs,
+            neighboring_pairs = neighbouring_pairs(polygons),
+            shared_vertices_of_neighbors = shared_vertices_of_neighbors(polygons),
 
-    new_data = CartogramFramework_global(
-        data        = data,
-        fixed_points    = None,
-        shape           = "contiguous2",
-        target_centers  = target_positions,
-        horizontal_pairs = horizontal_pairs,
-        vertical_pairs   = vertical_pairs,
-        neighboring_pairs = neighbouring_pairs(polygons),
-        shared_vertices_of_neighbors = shared_vertices_of_neighbors(polygons),
+            lambda_shape      = 0.5,
+            lambda_area       = 1.0,
+            lambda_center     = 0.0,
+            lambda_topology   = 0.0,
+            lambda_contiguous = 30.0,
+            soft_mean_scale   = True,
+            lambda_mean_scale = 1e5,
+            t_min = 0.01,
+            t_max = 98,
+            lambda_vertex_distance = 3.0,
+            vertex_distance_margin = 1.5,
+            lambda_repulsion  = 0.0,
+            contiguous_area_ratio_cap = np.inf,
+            contiguous_use_topology   = False,
+            gamma = 1.0,
+            beta  = 1.0,
+            alpha = 1.0,
+            epsilon = 1e-2,
+            b       = 1e-2,
 
-        lambda_shape      = 0.5,
-        lambda_area       = 1.0,
-        lambda_center     = 0.0,
-        lambda_topology   = 0.0,
-        lambda_contiguous = 30.0,
-        soft_mean_scale   = True,
-        lambda_mean_scale = 1e5,
-        t_min = 0.01,
-        t_max = 98,
-        lambda_vertex_distance = 3.0,
-        vertex_distance_margin = 1.5,
-        lambda_repulsion  = 0.0,
-        contiguous_area_ratio_cap = np.inf,
-        contiguous_use_topology   = False,
-        gamma = 1.0,
-        beta  = 1.0,
-        alpha = 1.0,
-        epsilon = 1e-2,
-        b       = 1e-2,
-
-        # ── Post-processing ───────────────────────────────────────────
-        postprocess_contiguous  = False,     # flip to False to skip entirely
-        postprocess_snap_method = "mean",   # midpoint snap on shared vertices
-        postprocess_disputed_pixels = True,
-        postprocess_gaps = True,
-        # Raster resolution shared by disputed-pixel resolution, gap
-        # filling, and the final equalize pass below. 500 is coarse for
-        # ~50 states of very different sizes (small states get very few
-        # pixels) -- raise this if you still see large area errors on the
-        # smallest regions.
-        postprocess_raster_resolution = 800,
-        # Bias disputed/gap pixel assignment toward whichever contesting
-        # region is currently furthest under its target area (0 = old
-        # pure-proximity behaviour).
-        postprocess_raster_area_bias = 0.05,
-        # Final raster area-correction pass: shifts thin boundary strips
-        # from area-surplus regions to their area-deficit neighbours
-        # directly on the pixel labelling (can't reintroduce gaps/overlaps
-        # the way an independent per-region rescale could).
-        postprocess_equalize_areas = True,
-        postprocess_equalize_max_passes = 30,
-        postprocess_equalize_tolerance = 0.02,
-    )
+            # ── Post-processing ───────────────────────────────────────────
+            postprocess_disputed_pixels = False,
+            postprocess_gaps = False,
+            # Raster resolution shared by disputed-pixel resolution, gap
+            # filling, and the final equalize pass below. 500 is coarse for
+            # ~50 states of very different sizes (small states get very few
+            # pixels) -- raise this if you still see large area errors on the
+            # smallest regions.
+            postprocess_raster_resolution = 800,
+            # Bias disputed/gap pixel assignment toward whichever contesting
+            # region is currently furthest under its target area (0 = old
+            # pure-proximity behaviour).
+            postprocess_raster_area_bias = 0.05,
+            # Final raster area-correction pass: shifts thin boundary strips
+            # from area-surplus regions to their area-deficit neighbours
+            # directly on the pixel labelling (can't reintroduce gaps/overlaps
+            # the way an independent per-region rescale could).
+            postprocess_equalize_areas = False,
+            postprocess_equalize_max_passes = 30,
+            postprocess_equalize_tolerance = 0.02,
+        )
 
     return new_data

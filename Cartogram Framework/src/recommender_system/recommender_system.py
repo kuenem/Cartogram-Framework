@@ -52,6 +52,36 @@ BASE_PRESETS: dict[str, dict] = {
         postprocess_equalize_max_passes=30,
         postprocess_equalize_tolerance=0.02,
     ),
+    "contiguous-without-postprocess": dict(
+            shape="contiguous2",
+            lambda_shape=0.5,
+            lambda_area=1.0,
+            lambda_center=0.0,
+            lambda_topology=0.0,
+            lambda_contiguous=30.0,
+            soft_mean_scale=True,
+            lambda_mean_scale=1e5,
+            t_min=0.01,
+            t_max=8.0,          
+            lambda_vertex_distance=3.0,
+            vertex_distance_margin=1.5,
+            lambda_repulsion=0.0,
+            contiguous_area_ratio_cap=np.inf,
+            contiguous_use_topology=False,
+            gamma=1.0,
+            beta=1.0,
+            alpha=1.0,
+            epsilon=1e-2,
+            b=1e-2,
+            postprocess_snap_method="mean",
+            postprocess_disputed_pixels=False,
+            postprocess_gaps=False,
+            postprocess_raster_resolution=800,
+            postprocess_raster_area_bias=0.05,
+            postprocess_equalize_areas=False,
+            postprocess_equalize_max_passes=30,
+            postprocess_equalize_tolerance=0.02,
+        ),
     "demers": dict(
         shape="square",
         lambda_shape=0.1,
@@ -345,17 +375,3 @@ def build_cartogram(
         )
 
     return new_data, params, trace
-
-if __name__ == "__main__":
-    demos = [
-        dict(cartogram_type="contiguous", size_accuracy=1.0),
-        dict(cartogram_type="contiguous", neighborhoods_kept=1.0),
-        dict(cartogram_type="contiguous", seamlessness=1.0, robustness=1.0),
-        dict(cartogram_type="dorling", position_accuracy=1.0),
-        dict(cartogram_type="noncontiguous", size_accuracy=1.0),
-    ]
-    for kwargs in demos:
-        params, trace = recommend_params(**kwargs)
-        print("=" * 78)
-        print(explain(trace))
-        print()

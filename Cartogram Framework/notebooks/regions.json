@@ -18,5 +18,20 @@
     "region": "taiwan",
     "level": "states",
     "year": 2024
+  },
+  "netherlands": {
+    "region": "netherlands",
+    "level": "states",
+    "year": 2020
+  },
+  "germany": {
+    "region": "germany",
+    "level": "states",
+    "year": 2024
+  },
+  "world_new": {
+    "region": "world",
+    "level": "states",
+    "year": 2020
   }
 }

@@ -144,14 +144,6 @@ def CartogramFramework_global(
     # Values > 1 are allowed but will cause regions to grow beyond original.
 
     # ── Contiguous post-processing ─────────────────────────────────────────
-    postprocess_contiguous: bool = False,
-    # When True AND shape in ("contiguous", "contiguous2"), automatically
-    # runs close_contiguous_gaps(). Has zero effect for any other shape mode.
-    postprocess_snap_method: str = "mean",
-    # Vertex-snapping method passed to close_contiguous_gaps():
-    #   "mean" — snap both sides to their midpoint (default, symmetric)
-    #   "i"    — polygon j's vertex moves to polygon i's position
-    #   "j"    — polygon i's vertex moves to polygon j's position
     postprocess_disputed_pixels: bool = False,
     postprocess_gaps: bool = False,
     postprocess_raster_resolution: int = 500,
@@ -360,7 +352,7 @@ def CartogramFramework_global(
         if base_shape == "circle" and shape_deformation == 0.0:
             init_polygons.append(make_circle(ctr, target_areas[k], n=64))
         elif base_shape == "square" and (shape_deformation == 0.0 or gamma == 0.0):
-            init_polygons.append(make_square(ctr, target_areas[k], n=64))
+            init_polygons.append(make_square(ctr, target_areas[k], n=4))
         else:
             init_polygons.append(data[name]["polygon"])
 
@@ -1063,18 +1055,6 @@ def CartogramFramework_global(
     # ------------------------------------------------------------------
     # 9. Contiguous post-processing (optional)
     # ------------------------------------------------------------------
-    if postprocess_contiguous and is_contiguous and shared_vertices_of_neighbors is not None:
-        print("Post-processing: snapping shared vertices "
-              f"(method='{postprocess_snap_method}')")
-        new_polygons = close_contiguous_gaps(
-            polygons                          = new_polygons,
-            shared_vertices_of_neighbors_data = shared_vertices_of_neighbors,
-            original_polygons                 = init_polygons,
-            method                            = postprocess_snap_method,
-            tolerance                         = shared_vertex_tolerance,
-        )
-
-        actual_areas = [polygon_areanp(p) for p in new_polygons]
 
     if postprocess_disputed_pixels:
             new_polygons = resolve_disputed_pixels_by_proximity(
@@ -1176,55 +1156,6 @@ def CartogramFramework_global(
     # }
 
     return data
-
-
-# ---------------------------------------------------------------------------
-# Post-processing: snap shared vertices to close contiguous gaps
-# ---------------------------------------------------------------------------
-
-def close_contiguous_gaps(
-    polygons: list,
-    shared_vertices_of_neighbors_data: list,
-    original_polygons: list,
-    method: str = "mean",
-    tolerance: float = 1e-8,
-) -> list:
-
-    # Work on copies so the input is never mutated
-    result = [np.array(p, dtype=float) for p in polygons]
-    orig   = [np.asarray(p, dtype=float) for p in original_polygons]
-
-    for entry in shared_vertices_of_neighbors_data:
-        i, j, shared_pts = entry[0], entry[1], entry[2]
-
-        if i >= len(result) or j >= len(result):
-            continue
-
-        # Resolve shared points to vertex INDICES in the original polygons.
-        # find_shared_vertex_indices uses exact coordinate matching on the
-        # original geometry — immune to post-optimisation drift.
-        kl_pairs = find_shared_vertex_indices(orig[i], orig[j], shared_pts, tolerance)
-
-        for (k, l) in kl_pairs:
-            if k >= len(result[i]) or l >= len(result[j]):
-                continue   # guard against polygon size mismatch
-
-            vi = result[i][k]   # optimised position of vertex k in polygon i
-            vj = result[j][l]   # optimised position of vertex l in polygon j
-
-            if method == "mean":
-                snapped = (vi + vj) / 2.0
-            elif method == "i":
-                snapped = vi.copy()
-            elif method == "j":
-                snapped = vj.copy()
-            else:
-                raise ValueError(f"method must be 'mean', 'i', or 'j', got {method!r}")
-
-            result[i][k] = snapped
-            result[j][l] = snapped
-
-    return result
 
 
 # ---------------------------------------------------------------------------
