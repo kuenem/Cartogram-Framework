@@ -1,9 +1,0 @@
-cartogram_type,cartographic_error,shape_deformation,preservation_of_relative_direction,topological_accuracy,spatial_deformation,global_shape,local_shape,complexity,data_ink_ratio
-Normal Map,0,10,10,10,10,10,10,8,7
-Mosaic Cartogram,2,3,6,7,4,5,2,4,8
-Demers Cartogram,1,2,6,0,3,4,1,6,9
-Dorling Cartogram,1,1,6,0,2,3,0,8,9
-Non-contiguous Cartogram,1,9,9,2,7,8,9,7,7
-Contiguous Cartogram,1,4,8,10,3,7,4,6,6
-Rectangular Cartogram,2,1,4,9,3,4,0,5,8
-Gridmap,2,1,5,4,2,3,0,7,9
