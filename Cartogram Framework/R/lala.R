@@ -3,22 +3,24 @@ library(cartogram)
 library(dplyr)
 library(rmapshaper)
 
-base_dir <- "/home/kuenem/Documents/development/lectures/Master Thesis/Cartogram Framework"
-geo_path <- file.path(base_dir, "data/geojson/usa/states.geojson")
-stats_path <- file.path(base_dir, "data/statistics/usa/states.csv")
-out_dir <- file.path(base_dir, "R")
+base_dir <- "/home/kuenem/Documents/development/lectures/Master Thesis"
+geo_path <- file.path(base_dir, "Cartogram Framework/data/geojson/germany/states.geojson")
+stats_path <- file.path(base_dir, "cartogram-cpp/sample_data/germany/states.csv")
+out_dir <- file.path(base_dir, "Cartogram Framework/R")
 
 # Edit these values in one place for a new dataset
-geojson_key <- "NAME_1"              # column in the GeoJSON used for joining
-csv_key <- "Entity"                 # column in the CSV used for joining
-weight_column <- "electoral_college"              # numeric column in the CSV used as the cartogram weight
-output_name <- "USA"              # base name for the generated files
-target_crs <- 2163                # 24378                 # 3826                  # projected CRS for Taiwan; change for other regions
+geojson_key <- "name"              # column in the GeoJSON used for joining
+csv_key <- "name"                 # column in the CSV used for joining
+weight_column <- "Population"              # numeric column in the CSV used as the cartogram weight
+output_name <- "Germany"              # base name for the generated files
+target_crs <- 3035                 # WGS 84 / NSIDC EASE-Grid 2.0 Global (equal-area)
 
 geojson <- st_read(geo_path, quiet = TRUE)
 print("read OK")
 
-pop <- read.csv(stats_path, stringsAsFactors = FALSE)
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+pop <- read.csv(stats_path, stringsAsFactors = FALSE, check.names = FALSE)
 
 normalize_name <- function(x) {
   x <- trimws(as.character(x))
@@ -44,7 +46,11 @@ geojson_with_data <- geojson_with_data %>%
 # Use a projected CRS that matches the region of the data.
 geojson_proj <- st_transform(geojson_with_data, target_crs)
 geojson_proj <- st_make_valid(geojson_proj)
-geojson_proj_simplified <- ms_simplify(geojson_proj, keep = 0.05)
+geojson_proj_simplified <- ms_simplify(
+  geojson_proj,
+  keep = 0.05,
+  keep_shapes = TRUE
+)
 
 print(colnames(geojson_proj_simplified))
 print(sum(is.na(geojson_proj_simplified$pop)))

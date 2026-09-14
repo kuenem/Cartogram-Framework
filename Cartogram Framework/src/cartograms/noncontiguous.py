@@ -13,22 +13,7 @@ from src.tests import *
 from src.core.preprocessing_data import preprocess, auto_area_scale
 
 def noncontiguous_cartogram(region, level, year="2016", area_scale="auto", area_scale_cap=1.0):
-    """
-    Parameters
-    ----------
-    area_scale : float or "auto" (default)
-        "auto" derives the largest-safe uniform area_scale so that no
-        region's target area exceeds `area_scale_cap` * its own original
-        area (see `auto_area_scale`). This is what prevents the
-        relatively-biggest-growing region from ballooning past its own
-        original footprint and overlapping neighbours that never moved.
-        Pass a float to opt back into the old fixed-multiplier behaviour.
-    area_scale_cap : float
-        Growth-ratio ceiling used when area_scale="auto". 1.0 (default)
-        means "no region may exceed its own original area". Values < 1.0
-        add extra safety margin; values > 1.0 permit some controlled
-        overgrowth if you've verified your specific layout tolerates it.
-    """
+
     data, polygons, target_areas, target_positions, names, centroid = loader(region, level, year=year)
     region_names = [k for k in data if k != "__meta__"]
     polygons = []
@@ -61,7 +46,6 @@ def noncontiguous_cartogram(region, level, year="2016", area_scale="auto", area_
         horizontal_pairs=None,
         vertical_pairs=None,
         shared_vertices_of_neighbors=None,
-        soft_mean_scale=True,
 
         lambda_shape=0.0,             # let area scaling dominate for shrinkage
         lambda_area=1.0,              # keep the soft mean-scale / area target active

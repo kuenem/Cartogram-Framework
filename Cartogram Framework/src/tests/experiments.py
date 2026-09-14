@@ -3,6 +3,8 @@ import sys
 import time
 import numpy as np
 import shapely
+from collections import defaultdict
+from shapely.geometry import Polygon as ShapelyPolygon
 
 project_dir = os.path.abspath(os.path.join(os.getcwd(), '..'))
 sys.path.append(project_dir)
@@ -17,10 +19,52 @@ from src.core import *
 # Helpers
 # ---------------------------------------------------------------------------
 
+def filter_evaluable_regions(data, target_area_key="target_area"):
+    dropped = [s for s in data if data[s][target_area_key] == 0]
+    if dropped:
+        print(f"Excluding {len(dropped)} placeholder region(s) from scoring: {dropped}")
+    return {s: v for s, v in data.items() if v[target_area_key] != 0}, dropped
+
+def _vertex_coincident_pairs(polygon_list, tol=1e-6):
+    polygon_list = [_to_polygon(p) for p in polygon_list]   # <-- added
+    buckets = defaultdict(set)
+    for idx, poly in enumerate(polygon_list):
+        for (x, y) in poly.exterior.coords:
+            key = (round(x / tol), round(y / tol))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    buckets[(key[0] + dx, key[1] + dy)].add(idx)
+
+    pairs = set()
+    for members in buckets.values():
+        members = list(members)
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                pairs.add(frozenset((members[i], members[j])))
+    return pairs
+
+
+def _touching_pairs(polygon_list, tol=0.0):
+    polygon_list = [_to_polygon(p) for p in polygon_list]   # <-- added
+    n = len(polygon_list)
+    buffered = [p.buffer(tol) if tol else p for p in polygon_list]
+    pairs = set()
+    for i in range(n):
+        for j in range(i + 1, n):
+            if buffered[i].intersects(buffered[j]):
+                pairs.add(frozenset((i, j)))
+    return pairs
+
+
+def neighbouring_pairs_(polygon_list, mode="touching", tol=1e-6):
+    if mode == "vertex":
+        return _vertex_coincident_pairs(polygon_list, tol=tol)
+    elif mode == "touching":
+        return _touching_pairs(polygon_list, tol=tol)
+    raise ValueError(f"Unknown adjacency mode: {mode!r}")
+
 def _to_polygon(obj):
-    """Coerce `obj` into a valid Shapely Polygon.
-    ...
-    """
+
     if hasattr(obj, "exterior"):
         poly = obj
     elif hasattr(obj, "geoms"):
@@ -42,18 +86,10 @@ def _to_polygon(obj):
 
 
 def _region_polygons(mapping, key):
-    """Return {state: Polygon} for every state in `mapping`."""
     return {state: _to_polygon(mapping[state][key]) for state in mapping.keys()}
 
 
 def _adjacency_pairs(polygons, tol=0.0):
-    """Build the set T of geographically neighbouring state pairs.
-
-    Two regions are considered adjacent if their polygons intersect
-    (optionally after a small buffer `tol`, useful for near-touching
-    geometries after floating point noise). Returned as a set of
-    frozenset({state_i, state_j}) pairs, restricted to i != j.
-    """
     states = list(polygons.keys())
     pairs = set()
     for i in range(len(states)):
@@ -68,11 +104,6 @@ def _adjacency_pairs(polygons, tol=0.0):
 
 
 def neighbouring_state_pairs(org_data, map_key="polygon", tol=0.0):
-    """Public helper: adjacency set T over the *original map* geometry.
-
-    Used to restrict positional-fidelity metrics (4.4.3) to O(n) pairs on
-    large maps such as the World dataset, instead of the full O(n^2) set.
-    """
     map_polygons = _region_polygons(org_data, map_key)
     return _adjacency_pairs(map_polygons, tol=tol)
 
@@ -81,10 +112,13 @@ def neighbouring_state_pairs(org_data, map_key="polygon", tol=0.0):
 # 4.4.4 Topological Accuracy: Adjacency Error (already present)
 # ---------------------------------------------------------------------------
 
-def topological_accuracy(cartogram_polygons, map_polygons):
-    """Adjacency error tau, eq. (4.7): 1 - |Ec ∩ Em| / |Ec ∪ Em|."""
-    Ec = set(neighbouring_pairs(cartogram_polygons))
-    Em = set(neighbouring_pairs(map_polygons))
+def topological_accuracy(cartogram_polygons, map_polygons, cartogram_mode="touching"):
+    if cartogram_mode == "touching":
+        Ec = set(neighbouring_pairs(cartogram_polygons))
+        Em = set(neighbouring_pairs(map_polygons))
+    else:
+        Ec = set(neighbouring_pairs_(cartogram_polygons, mode=cartogram_mode))
+        Em = set(neighbouring_pairs_(map_polygons, mode="touching"))
 
     return 1 - len(Ec & Em) / len(Ec | Em)
 
@@ -98,15 +132,15 @@ adjacency_error = topological_accuracy
 # ---------------------------------------------------------------------------
 
 def cartographic_errors(data, new_area_key="new_area", target_area_key="target_area"):
-    """Per-region cartographic error epsilon_v, eq. (4.1)."""
     errors = []
     for state in data.keys():
-        errors.append(abs(data[state][new_area_key] - data[state][target_area_key])/max(data[state][new_area_key], data[state][target_area_key]))
+        na, ta = data[state][new_area_key], data[state][target_area_key]
+        denom = max(na, ta)
+        errors.append(abs(na - ta) / denom if denom > 0 else 0.0)    
     return errors
 
 
 def max_relative_area_error(data, new_area_key="new_area", target_area_key="target_area"):
-    """E_max, eq. (4.2): unbounded, asymmetric, sensitive to over-scaling."""
     errors = []
     for state in data.keys():
         a = data[state][new_area_key]
@@ -116,17 +150,7 @@ def max_relative_area_error(data, new_area_key="new_area", target_area_key="targ
 
 
 def success_rate(data, org_data=None, new_area_key="new_area", target_area_key="target_area",
-                  original_area_key="original_area"):
-    """SR(N), eq. (4.3) with the editorial-note correction applied:
-
-        SR_i = |A_i - A_i^(0)| / |A_i^* - A_i^(0)|
-
-    i.e. how much of the intended area change was actually achieved
-    (0 = no progress toward the target, 1 = target reached exactly; values
-    above 1 indicate overshoot). Regions whose target change is ~0 (A_i^* ~
-    A_i^(0)) are skipped to avoid dividing by zero, since "success" is
-    undefined when no change was intended.
-    """
+                  original_area_key="original_area", zero_change_tol=1e-9):
     if org_data is None:
         org_data = data
     rates = []
@@ -136,7 +160,11 @@ def success_rate(data, org_data=None, new_area_key="new_area", target_area_key="
         a = data[state][new_area_key]
         a_star = data[state][target_area_key]
         denom = abs(a_star - a0)
-        if denom == 0:
+        # print(f"target_area: {a_star}")
+        # print(f"original_area: {a0}")
+        # print(f"denom: {denom}")
+        # print(f"numerator: {abs(a - a0)}")
+        if denom < zero_change_tol * max(abs(a0), abs(a_star), 1e-12):
             continue
         rates.append(abs(a - a0) / denom)
     return rates
@@ -147,7 +175,6 @@ def success_rate(data, org_data=None, new_area_key="new_area", target_area_key="
 # ---------------------------------------------------------------------------
 
 def _normalize_unit_area(poly_coords):
-    """Center on centroid and rescale to unit area, per Nusrat et al. Sec 4."""
     poly = _to_polygon(poly_coords)
     area = poly.area
     if area <= 0:
@@ -160,8 +187,6 @@ def _normalize_unit_area(poly_coords):
 
 
 def hamming_distance(data, org_data, map_key="polygon", cartogram_key="new_polygon"):
-    """Hamming distance delta_v, eq. (4.4). Normalized to [0, 1], poolable
-    across datasets of different absolute size."""
     errors = []
     for state in data.keys():
         original_poly = org_data[state][map_key]
@@ -174,15 +199,6 @@ def hamming_distance(data, org_data, map_key="polygon", cartogram_key="new_polyg
 
 
 def frechet_hausdorff_distances(data, org_data, map_key="polygon", cartogram_key="new_polygon"):
-    """Discrete Frechet and Hausdorff boundary distances (Sec. 4.4.2).
-
-    Unlike the area-based Hamming distance, these compare the map and
-    cartogram polygon *boundaries* directly, so they catch localised
-    boundary spikes (vertex penetration, runaway scale) that an
-    area-aggregated score can dilute. Reported in raw map units, so they
-    should be aggregated per dataset rather than pooled across datasets of
-    very different absolute size.
-    """
     frechet, hausdorff = [], []
     for state in data.keys():
         p_orig = _to_polygon(org_data[state][map_key])
@@ -200,13 +216,6 @@ def frechet_hausdorff_distances(data, org_data, map_key="polygon", cartogram_key
 
 def angular_orientation_error(data, org_data, map_key="polygon", cartogram_key="new_polygon",
                                pairs=None):
-    """Angular orientation error theta_ij, eq. (4.5).
-
-    `pairs`: optional iterable of frozenset({state_i, state_j}) restricting
-    the comparison to adjacent pairs (see `neighbouring_state_pairs`), used
-    for large maps to keep the comparison O(n) instead of O(n^2).
-    Defaults to the full pairwise set.
-    """
     states = list(data.keys())
     orig_centroids = {s: _to_polygon(org_data[s][map_key]).centroid for s in states}
     new_centroids = {s: _to_polygon(data[s][cartogram_key]).centroid for s in states}
@@ -230,12 +239,6 @@ def angular_orientation_error(data, org_data, map_key="polygon", cartogram_key="
 
 def orthogonal_direction_error(data, org_data, map_key="polygon", cartogram_key="new_polygon",
                                 pairs=None):
-    """Orthogonal (relative-direction) error rho, eq. (4.6).
-
-    Fraction of region pairs whose cardinal (N/S, E/W) ordering flips
-    between map and cartogram - a coarser, more interpretable companion to
-    the angular error above.
-    """
     states = list(data.keys())
     orig_centroids = {s: _to_polygon(org_data[s][map_key]).centroid for s in states}
     new_centroids = {s: _to_polygon(data[s][cartogram_key]).centroid for s in states}
@@ -264,16 +267,6 @@ def orthogonal_direction_error(data, org_data, map_key="polygon", cartogram_key=
 # ---------------------------------------------------------------------------
 
 def overlap_integrity(data, cartogram_key="new_polygon"):
-    """Overlap / self-intersection check (Sec. 4.4.5), eq. (4.8).
-
-    Returns a dict with:
-      - "invalid_count": number of self-intersecting (invalid) cartogram
-        polygons, checked *before* repair via buffer(0)
-      - "overlap_pair_count": number of region pairs whose (repaired)
-        polygons have a positive-area intersection
-      - "overlap_fraction": Phi_overlap, the summed pairwise overlap area
-        as a fraction of total map area
-    """
     states = list(data.keys())
     raw_polys, repaired_polys = {}, {}
     invalid_count = 0
@@ -311,15 +304,6 @@ def overlap_integrity(data, cartogram_key="new_polygon"):
 # ---------------------------------------------------------------------------
 
 def gap_error(data, org_data=None, map_key="polygon", cartogram_key="new_polygon", tol=1e-9):
-    """Gap metric (Sec. 4.4.6): previously-adjacent regions pulling apart.
-
-    For every pair adjacent in the *original map*, the gap contribution is
-    the area of the convex hull of the pair's union minus the summed area
-    of the two (repaired) polygons - a positive value if a visible gap has
-    opened between regions that used to share a border, ~0 if they still
-    touch or overlap. Total gap area is reported both raw and as a fraction
-    of total map area, mirroring `overlap_integrity`.
-    """
     if org_data is None:
         org_data = data
 
@@ -347,14 +331,6 @@ def gap_error(data, org_data=None, map_key="polygon", cartogram_key="new_polygon
 # ---------------------------------------------------------------------------
 
 def complexity_metrics(data, cartogram_key="new_polygon"):
-    """Mean/max polygon vertex count per region (Sec. 4.4.7).
-
-    Post-processing steps such as gap-closing and overlap resolution can
-    inflate polygon complexity, so this is tracked separately from quality.
-    Runtime itself is not computed here since it depends on wall-clock
-    timing around the solver call; see `time_cartogram_run` below for a
-    thin convenience wrapper.
-    """
     counts = []
     for state in data.keys():
         poly = _to_polygon(data[state][cartogram_key])
@@ -366,12 +342,6 @@ def complexity_metrics(data, cartogram_key="new_polygon"):
 
 
 def time_cartogram_run(solve_fn, *args, **kwargs):
-    """Convenience wrapper reporting wall-clock runtime of a solver call,
-    matching the per-type / per-dataset runtimes reported in Table 4.1.
-    Data loading should happen before this call, per the comparative
-    protocol in Sec. 4.3 ("Runtime was measured separately from data
-    loading to final polygon output.").
-    """
     start = time.perf_counter()
     result = solve_fn(*args, **kwargs)
     elapsed_ms = (time.perf_counter() - start) * 1000.0
@@ -384,14 +354,7 @@ def time_cartogram_run(solve_fn, *args, **kwargs):
 
 def quality_criteria(data, org_data=None, stat_data=None, new_area_key="new_area", map_key="polygon",
                       target_area_key="target_area", cartogram_key="new_polygon",
-                      original_area_key="original_area", restrict_to_adjacent=False, adjacency_tol=0.0):
-    """Compute the full quality-criteria report from Sec. 4.4.
-
-    `restrict_to_adjacent`: if True, angular/orthogonal positional-fidelity
-    metrics are computed only over map-adjacent pairs (the O(n) variant
-    Sec. 4.4.3 recommends for large maps such as the World dataset) rather
-    than all O(n^2) pairs.
-    """
+                      original_area_key="original_area", restrict_to_adjacent=False, adjacency_tol=0.0, cartogram_mode="touching"):
     errors = {}
     if not org_data:
         org_data = data
@@ -417,7 +380,7 @@ def quality_criteria(data, org_data=None, stat_data=None, new_area_key="new_area
     # 4.4.4 Topological Accuracy: Adjacency Error
     cartogram_polygons = [data[stat][cartogram_key] for stat in data.keys()]
     map_polygons = [org_data[stat][map_key] for stat in org_data.keys()]
-    errors["Topological accuracy"] = topological_accuracy(cartogram_polygons, map_polygons)
+    errors["Topological accuracy"] = topological_accuracy(cartogram_polygons, map_polygons, cartogram_mode=cartogram_mode)
     # 4.4.2 Geographical Accuracy: Shape Preservation
     hamming = hamming_distance(data, org_data, map_key=map_key, cartogram_key=cartogram_key)
     errors["Mean Hamming distance"] = np.mean(hamming)

@@ -1,9 +1,4 @@
 {
-  "world": {
-    "region": "contiguous/world",
-    "level": "original_world",
-    "year": 2016
-  },
   "india": {
     "region": "india",
     "level": "states",
@@ -29,7 +24,7 @@
     "level": "states",
     "year": 2024
   },
-  "world_new": {
+  "world": {
     "region": "world",
     "level": "states",
     "year": 2020

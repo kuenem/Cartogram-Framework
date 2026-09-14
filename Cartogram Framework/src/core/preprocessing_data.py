@@ -29,20 +29,7 @@ def preprocess(
     cartographic_error,
     target_centers=None,
 ):
-    """
-    Normalise region dictionaries into parallel arrays.
 
-    Expected dictionary keys per region:
-        polygon, area, target_area, target_positions, centroid
-
-    Returns:
-        data            dict[str, dict]
-        polygons        list[np.ndarray]   each (n_i, 2)
-        target_areas    list[float]
-        fixed_points    list[np.ndarray]   each (2,)
-        cartographic_error  float
-        target_centers  list[np.ndarray]   each (2,)
-    """
     if not isinstance(data, dict):
         raise TypeError(
             "preprocess() expects the loader dictionary returned by get_polygon_data()/loader()."
@@ -118,11 +105,7 @@ def preprocess_global(
     lambda_center: Optional[float] = None,
     lambda_topology: Optional[float] = None,
 ):
-    """
-    Maps the quality-criterion API onto the four λ weights used in the
-    objective. If explicit λ values are provided they override the
-    derived ones.
-    """
+
     data, polygons, target_areas, fixed_points, cartographic_error, target_centers = preprocess(
         data,
         fixed_points,
@@ -154,31 +137,6 @@ def preprocess_global(
 # ---------------------------------------------------------------------------
 
 def auto_area_scale(data, target_areas, cap: float = 1.0) -> float:
-    """
-    Compute the largest-safe `area_scale` multiplier for non-contiguous
-    cartograms.
-
-    A plain non-contiguous cartogram scales each region isotropically
-    around its own fixed centroid, with no shared-vertex coupling to
-    neighbours. If any region's (sum-normalised) target area exceeds its
-    *own* original area, that region grows beyond the footprint its
-    neighbours were originally drawn up against — which is how
-    non-contiguous cartograms end up overlapping.
-
-    `target_areas` must already be the SUM-NORMALISED list (i.e. what
-    `preprocess()` returns), not the raw per-region target_area values —
-    the normalisation step changes every ratio, so computing this before
-    normalisation would give the wrong scale.
-
-    Returns
-    -------
-    float
-        `1.0` if every region's growth ratio is already <= `cap` (no
-        scaling needed). Otherwise `cap / max_ratio`, i.e. the multiplier
-        that brings the single worst-offending region's target area down
-        to exactly `cap` * its own original area, shrinking every other
-        region proportionally less.
-    """
     region_names = [name for name in data.keys() if name != "__meta__"]
     if len(region_names) != len(target_areas):
         raise ValueError(
@@ -217,15 +175,7 @@ def compute_leaders(
     adjacent_pairs: set[tuple[int, int]],
     tol: float = 1e-3,
 ) -> list[tuple[int, int, np.ndarray]]:
-    """
-    For every adjacent pair (i,j) whose squares do not touch, return a
-    minimal-length monotone orthogonal leader.
 
-    Returns
-    -------
-    leaders : list of (i, j, waypoints)
-        waypoints is an (m,2) array of the polyline vertices.
-    """
     n = len(centers)
     leaders = []
 
@@ -272,10 +222,6 @@ def compute_leaders(
 # ---------------------------------------------------------------------------
 
 def _build_vertex_index(poly: np.ndarray, tolerance: float = 1e-8) -> dict:
-    """
-    Return a dict  {rounded_key: vertex_index}  for fast lookup of which
-    index in `poly` corresponds to a given coordinate.
-    """
     idx = {}
     for k, pt in enumerate(poly):
         key = (round(pt[0] / tolerance) * tolerance,
@@ -290,12 +236,6 @@ def find_shared_vertex_indices(
     shared_pts: list,
     tolerance: float = 1e-8,
 ) -> list[tuple[int, int]]:
-    """
-    For each shared point in `shared_pts`, return (k, l) where
-    k = index in poly_i and l = index in poly_j.
-
-    Points not found in either polygon are silently skipped.
-    """
     idx_i = _build_vertex_index(poly_i, tolerance)
     idx_j = _build_vertex_index(poly_j, tolerance)
 
@@ -312,11 +252,7 @@ def find_shared_vertex_indices(
 # Shared-vertex helper functions (user-supplied; included here for convenience)
 # ---------------------------------------------------------------------------
 
-def neighbouring_pairs(polygons, tolerance=1e-8):
-    """
-    Return list of (i, j) pairs such that polygon i and polygon j share
-    at least one vertex (within tolerance).
-    """
+def neighbouring_pairs(polygons, tolerance=1e0):
     n = len(polygons)
     neighbors = []
     for i in range(n):
@@ -335,10 +271,7 @@ def neighbouring_pairs(polygons, tolerance=1e-8):
 
 
 def common_vertices(poly1, poly2, tolerance=1e-8):
-    """
-    Return a list of points (each as [lon, lat]) that appear in both polygons.
-    Points are considered equal if their distance is < tolerance.
-    """
+ 
     set1 = {}
     for pt in poly1:
         key = (round(pt[0] / tolerance) * tolerance,
@@ -357,11 +290,7 @@ def common_vertices(poly1, poly2, tolerance=1e-8):
 
 
 def shared_vertices_of_neighbors(polygons, tolerance=1e-1):
-    """
-    Return a list of [i, j, shared_points] where:
-      - i, j are indices of neighbouring polygons
-      - shared_points is a list of vertices they have in common
-    """
+
     neighbors = neighbouring_pairs(polygons, tolerance)
     result = []
     for i, j in neighbors:
