@@ -1,36 +1,72 @@
 # Cartogram Framework
 
-A Python framework for generating and evaluating cartograms, including Demers (square), Dorling (circle), non-contiguous, and contiguous variants.
+A Python framework for generating and evaluating cartograms. It includes
+Demers (squares), Dorling (circles), non-contiguous, and contiguous variants,
+as well as plotting and quality-metric helpers.
 
-## What's included
+## Project layout
 
-- `src/core/CartogramFramework.py`: main optimisation entry point via `CartogramFramework_global`
-- `src/io/`: including loader for statistical data and geojsons
-- `src/viz/`: containing plotting methods
-- `src/tests/`: evaluation metrics for cartogram quality and recommender system code
-- `notebooks/`: contains notebooks with example code especially interesting: cartograms.ipynb and recommender.ipynb. cartograms.ipynb is wrapped with the correct parameter choices from src/cartograms/XXX.py. A more raw approach should be possible through exploration.ipynb (DISCLAIMER Not used in a while)
-- `data/` : Containing data for usa, netherlands, germany, india, taiwan/china and the world. GeoJson identifier has to be in src/io/geojson_parser.py in the if else loop and name column and value column name have to be present in src/io/load_data.py for new data. The data should also contain a year column. 
+- `src/cartograms/`: high-level drivers for the four cartogram variants
+- `src/core/`: optimisation and preprocessing routines
+- `src/io/`: GeoJSON and statistical-data loaders
+- `src/geometry/`: polygon and adjacency utilities
+- `src/tests/`: quality metrics, example data, and recommender experiments
+- `src/viz/`: plotting and quality-criteria visualisations
+- `data/`: GeoJSON boundaries and statistical data for supported regions
+- `notebooks/`: exploratory examples and thesis experiments
+- `R/`: R implementation used for baseline comparisons
 
-## Install
+## Setup
 
-Create a Python environment and install the project dependencies:
+From the repository root, create an environment and install the dependencies:
 
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-## Tests
-Run `notebooks/cartograms.ipynb` 
+The project is currently run directly from the repository, so commands that
+import `src` should be executed from this directory.
 
-## Typical workflow
+## Quick start
 
-1. Load a dataset with `loader()`. (Has all standard regions with the right year etc.)
-2. Build adjacency, ordering, and shared-vertex relationships from the input polygons.
-3. Run `CartogramFramework_global(...)` with the desired shape mode.
-4. Visualize the result with `plot_polys_data(...)`.
+The high-level drivers accept a region configuration, a geographic level, and
+an optional year. Supported region configurations are listed in
+`notebooks/regions.json`.
 
-## Notes
+```python
+from src.cartograms import demers_cartogram
+from src.utils.common import get_region
 
-- The framework expects polygon geometry and statistics data in the project's `data/` folders.
-- In R the script that was used for creating of the baseline is `lala.R` has to be modified for the according region.
-- `shapely` is mainly used for metrics and evaluation helpers, while the optimisation path depends on `cvxpy`, `numpy`, `scipy`, `scikit-image`, `matplotlib`, `pandas`, and `geojson`.
+region, level, year = get_region("netherlands")
+data = demers_cartogram(region, level, year)
+```
+
+Use `dorling_cartogram`, `noncontiguous_cartogram`, or
+`contiguous_cartogram` for the other cartogram types. Results can be plotted
+with `src.viz.plot_poly.plot_polys_data` and evaluated with
+`src.tests.experiments.quality_criteria`.
+
+## Verification
+
+Run this lightweight smoke check from the repository root after setup:
+
+```bash
+python -m compileall -q src
+python -c "import src.cartograms, src.io, src.viz; print('imports: ok')"
+```
+
+The notebooks contain the computational examples and may take substantially
+longer because they solve full cartogram instances. Open
+`notebooks/cartograms.ipynb` for the main end-to-end examples and
+`notebooks/recommender.ipynb` for the parameter recommender experiments.
+
+## Adding data
+
+Each dataset needs matching polygon and statistical files under `data/`.
+Region-specific GeoJSON handling lives in `src/io/geojson_parser.py`, while
+statistical column mappings are handled in `src/io/load_data.py`. New data
+should include a region-name column, a value column, and a year column.
+
+The baseline comparison script is `R/cartogrampackage.R`.

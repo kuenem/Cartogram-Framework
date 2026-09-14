@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+qc_figures/
+*.svg
+*.png
+notebooks/exploration.ipynb
